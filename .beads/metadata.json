@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "evolution_video",
+  "project_id": "876491e1-4f6b-401e-ac3b-157b76ea7722"
+}
