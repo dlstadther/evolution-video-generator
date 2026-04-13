@@ -28,7 +28,7 @@ Folder structure expected:
 Configuration (edit the CONFIG section below or use CLI flags):
     --seconds-per-photo   Duration each photo is shown (default: 2)
     --output-dir          Where to write output videos (default: ./output)
-    --max-days            Cap at N days of life (default: 183 ≈ 6 months)
+    --max-days            Cap at N days of life (default: inferred from photo count)
     --crf                 H.265 quality, lower = better (default: 23)
     --resolution          Output resolution WxH (default: 1920x1080)
 """
@@ -45,7 +45,7 @@ from pathlib import Path
 # ─── CONFIG DEFAULTS ──────────────────────────────────────────────────────────
 SECONDS_PER_PHOTO = 2
 OUTPUT_DIR = "./output"
-MAX_DAYS = 183          # ~6 months
+MAX_DAYS = 183          # ~6 months — used only as fallback if inference is unavailable
 CRF = 23                # H.265 quality (18=high quality, 28=smaller file)
 RESOLUTION = "1920x1080"
 DEFAULT_WORKERS = min(os.cpu_count() or 4, 8)
@@ -386,8 +386,9 @@ Examples:
                         help=f"Where to save the output video (default: {OUTPUT_DIR})")
     parser.add_argument("--seconds-per-photo", type=int, default=SECONDS_PER_PHOTO,
                         help=f"Seconds each photo is displayed (default: {SECONDS_PER_PHOTO})")
-    parser.add_argument("--max-days", type=int, default=MAX_DAYS,
-                        help=f"Maximum days to include (default: {MAX_DAYS} ≈ 6 months)")
+    parser.add_argument("--max-days", type=int, default=None,
+                        help="Maximum days to include (default: inferred from photo count). "
+                             "Use to trim a long archive or cap at a milestone.")
     parser.add_argument("--crf", type=int, default=CRF,
                         help=f"H.265 CRF quality value — lower = better quality/larger file (default: {CRF})")
     parser.add_argument("--resolution", type=str, default=RESOLUTION,
@@ -408,15 +409,18 @@ Examples:
     photos_dir = args.photos_dir.resolve()
     output_dir = args.output_dir.resolve()
 
-    if not find_photos(photos_dir):
+    photos = find_photos(photos_dir)
+    if not photos:
         print(f"❌ No dated photos found in {photos_dir}")
         sys.exit(1)
+
+    max_days = args.max_days if args.max_days is not None else len(photos)
 
     make_single_child_video(
         photos_dir,
         output_dir,
         seconds_per_photo=args.seconds_per_photo,
-        max_days=args.max_days,
+        max_days=max_days,
         resolution=args.resolution,
         crf=args.crf,
         birth_date=args.birth_date,
