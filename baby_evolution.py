@@ -304,7 +304,7 @@ def make_single_child_video(
             work_items.append((day_num, clip_path, age_label, jpeg_path))
 
         total_clips = len(work_items)
-        print(f"  🚀 Rendering {total_clips} clips with {workers} worker(s)...")
+        print(f"  🚀 Rendering {total_clips} day clips with {workers} worker(s)...")
 
         def render_clip(item: tuple[int, Path, str, Path]) -> None:
             _, clip_path, age_label, jpeg_path = item
@@ -350,7 +350,7 @@ def make_single_child_video(
                 concat_f.write(f"file '{clip_path}'\n")
 
         output_path = output_dir / f"evolution_{child_name}.mp4"
-        print(f"  🔗 Concatenating {total_clips + 1} clips...")
+        print(f"  🔗 Concatenating {total_clips + 1} clips (1 title card + {total_clips} day clips)...")
         cmd = [
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
