@@ -34,6 +34,7 @@ Configuration (edit the CONFIG section below or use CLI flags):
 """
 
 import argparse
+import concurrent.futures
 import datetime
 import os
 import subprocess
@@ -47,6 +48,7 @@ OUTPUT_DIR = "./output"
 MAX_DAYS = 183          # ~6 months
 CRF = 23                # H.265 quality (18=high quality, 28=smaller file)
 RESOLUTION = "1920x1080"
+DEFAULT_WORKERS = min(os.cpu_count() or 4, 8)
 FONT_SIZE_SINGLE = 64   # age label
 FONT_SIZE_TITLE = 96
 FONT_SIZE_SUBTITLE = 52
@@ -231,6 +233,7 @@ def make_single_child_video(
     crf: int = CRF,
     birth_date: datetime.date | None = None,
     subtitle: str | None = None,
+    workers: int = DEFAULT_WORKERS,
 ) -> Path | None:
     """Create a single-child evolution video."""
     child_name = photos_dir.name
@@ -257,69 +260,79 @@ def make_single_child_video(
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
         clip_list_path = tmpdir / "clips.txt"
-        clip_count = 0
 
-        # Write concat list incrementally — never accumulate clip paths in memory
+        # Title card (sequential — single call, no parallelism benefit)
+        title_path = tmpdir / "title.mp4"
+        make_title_card(child_name, title_path, resolution=resolution, crf=crf,
+                        subtitle=subtitle or subtitle_from_max_days(max_days))
+
+        # Build ordered work list and pre-convert any HEIC files sequentially
+        # (ensure_jpeg is not thread-safe for the same source file, so do it here)
+        work_items: list[tuple[int, Path, str, Path]] = []  # (day_num, clip_path, age_label, jpeg_path)
+        last_photo = None
+        for day_num in range(1, max_days + 1):
+            current_date = birth + datetime.timedelta(days=day_num - 1)
+            photo = photo_map.get(current_date)
+
+            if photo:
+                last_photo = photo
+            elif last_photo:
+                # Use previous day's photo if missing
+                photo = last_photo
+            else:
+                continue  # No photo yet (shouldn't happen if birth date is correct)
+
+            age_label = format_age(current_date, birth)
+            clip_path = tmpdir / f"clip_{day_num:04d}.mp4"
+            jpeg_path = ensure_jpeg(photo, tmpdir)  # HEIC conversion here (deduped, sequential)
+            work_items.append((day_num, clip_path, age_label, jpeg_path))
+
+        total_clips = len(work_items)
+        print(f"  🚀 Rendering {total_clips} clips with {workers} worker(s)...")
+
+        def render_clip(item: tuple[int, Path, str, Path]) -> None:
+            _, clip_path, age_label, jpeg_path = item
+            vf = (
+                f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+                f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,"
+                f"drawtext="
+                f"text='{ffmpeg_escape(age_label)}':"
+                f"fontsize={FONT_SIZE_SINGLE}:"
+                f"fontcolor=white:"
+                f"bordercolor=black:borderw=3:"
+                f"x=(w-text_w)/2:y=h-text_h-40"
+            )
+            cmd = [
+                "ffmpeg", "-y",
+                "-loop", "1", "-i", str(jpeg_path),
+                "-vf", vf,
+                "-c:v", "libx265",
+                "-crf", str(crf),
+                "-t", str(seconds_per_photo),
+                "-pix_fmt", "yuv420p",
+                "-tag:v", "hvc1",
+                "-r", "30",
+                str(clip_path),
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        completed = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(render_clip, item): item[0] for item in work_items}
+            for future in concurrent.futures.as_completed(futures):
+                future.result()  # re-raise any subprocess exception
+                completed += 1
+                if completed % 30 == 0:
+                    print(f"  ✅ Rendered {completed}/{total_clips} clips")
+
+        # Write concat list in day order after all clips are ready
         with open(clip_list_path, "w") as concat_f:
-
-            # Title card
-            title_path = tmpdir / "title.mp4"
-            make_title_card(child_name, title_path, resolution=resolution, crf=crf,
-                            subtitle=subtitle or subtitle_from_max_days(max_days))
             concat_f.write(f"file '{title_path}'\n")
-            clip_count += 1
-
-            last_photo = None
-            for day_num in range(1, max_days + 1):
-                current_date = birth + datetime.timedelta(days=day_num - 1)
-                photo = photo_map.get(current_date)
-
-                if photo:
-                    last_photo = photo
-                elif last_photo:
-                    # Use previous day's photo if missing
-                    photo = last_photo
-                else:
-                    continue  # No photo yet (shouldn't happen if birth date is correct)
-
-                age_label = format_age(current_date, birth)
-                clip_path = tmpdir / f"clip_{day_num:04d}.mp4"
-
-                # Scale photo to fit within frame (pillarbox), overlay text
-                vf = (
-                    f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
-                    f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,"
-                    f"drawtext="
-                    f"text='{ffmpeg_escape(age_label)}':"
-                    f"fontsize={FONT_SIZE_SINGLE}:"
-                    f"fontcolor=white:"
-                    f"bordercolor=black:borderw=3:"
-                    f"x=(w-text_w)/2:y=h-text_h-40"
-                )
-
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-loop", "1", "-i", str(ensure_jpeg(photo, tmpdir)),
-                    "-vf", vf,
-                    "-c:v", "libx265",
-                    "-crf", str(crf),
-                    "-t", str(seconds_per_photo),
-                    "-pix_fmt", "yuv420p",
-                    "-tag:v", "hvc1",
-                    "-r", "30",
-                    str(clip_path),
-                ]
-                # Redirect ffmpeg output to DEVNULL — capture_output=True buffers all
-                # stderr/stdout in memory for every call and is never inspected
-                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for _, clip_path, _, _ in work_items:
                 concat_f.write(f"file '{clip_path}'\n")
-                clip_count += 1
-
-                if day_num % 30 == 0:
-                    print(f"  ✅ Processed day {day_num}/{max_days}")
 
         output_path = output_dir / f"evolution_{child_name}.mp4"
-        print(f"  🔗 Concatenating {clip_count} clips...")
+        print(f"  🔗 Concatenating {total_clips + 1} clips...")
         cmd = [
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
@@ -367,6 +380,9 @@ Examples:
     parser.add_argument("--birth-date", type=datetime.date.fromisoformat,
                         help="Override the inferred birth date (format: YYYY-MM-DD). "
                              "Defaults to the date of the earliest photo.")
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
+                        help=f"Number of parallel ffmpeg workers for clip rendering "
+                             f"(default: {DEFAULT_WORKERS}). Use 1 to render sequentially.")
 
     args = parser.parse_args()
     check_ffmpeg()
@@ -387,6 +403,7 @@ Examples:
         crf=args.crf,
         birth_date=args.birth_date,
         subtitle=args.subtitle,
+        workers=args.workers,
     )
 
     print(f"\n🎉 All done! Video saved to: {output_dir}")
