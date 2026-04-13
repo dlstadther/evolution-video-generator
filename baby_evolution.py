@@ -170,6 +170,22 @@ def ffmpeg_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
 
 
+def print_progress(completed: int, total: int, bar_width: int = 30) -> None:
+    """Print a progress bar, overwriting the current line on a TTY.
+
+    TTY:         \\r  [=============>        ]  68%  clip 125/183
+    Non-TTY:     prints a plain line every 30 clips and at completion.
+    """
+    pct = completed / total if total else 1.0
+    filled = int(bar_width * pct)
+    arrow = ">" if filled < bar_width else ""
+    bar = "=" * filled + arrow + " " * (bar_width - filled - len(arrow))
+    if sys.stdout.isatty():
+        print(f"\r  [{bar}] {pct:>4.0%}  clip {completed}/{total}", end="", flush=True)
+    elif completed % 30 == 0 or completed == total:
+        print(f"  ✅ Rendered {completed}/{total} clips")
+
+
 def check_ffmpeg():
     """Ensure ffmpeg is available."""
     try:
@@ -317,13 +333,15 @@ def make_single_child_video(
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         completed = 0
+        print_progress(0, total_clips)
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(render_clip, item): item[0] for item in work_items}
             for future in concurrent.futures.as_completed(futures):
                 future.result()  # re-raise any subprocess exception
                 completed += 1
-                if completed % 30 == 0:
-                    print(f"  ✅ Rendered {completed}/{total_clips} clips")
+                print_progress(completed, total_clips)
+        if sys.stdout.isatty():
+            print()  # move past the progress bar line
 
         # Write concat list in day order after all clips are ready
         with open(clip_list_path, "w") as concat_f:
