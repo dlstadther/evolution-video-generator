@@ -4,3 +4,14 @@
 .dolt/
 *.db
 .beads-credential-key
+
+# Raw/unprocessed source photos (personal; run preprocess.py to prepare dated copies)
+raw/
+
+# Personal photos — ignore subject subdirectories, keep the placeholder README
+photos/*
+!photos/README.md
+
+# Generated videos — ignore output files, keep the placeholder README
+output/*
+!output/README.md
