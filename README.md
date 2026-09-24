@@ -81,11 +81,45 @@ uv run evolution.py --photos-dir ./photos/Emma --start-date 2024-01-15
 
 Output videos are written to `./output/` by default.
 
+## Configuration file
+
+To make videos for many subjects in one run, put the settings in a TOML file and pass it with `--config`. The script makes one video for each `[[subjects]]` table.
+
+```toml
+# evolution.toml
+output_dir = "./output"
+seconds_per_photo = 2
+
+[[subjects]]
+name = "Emma"                  # optional, defaults to the photos_dir folder name
+photos_dir = "./photos/Emma"   # required
+start_date = 2024-01-15
+
+[[subjects]]
+photos_dir = "./photos/Noah"
+max_days = 180
+```
+
+```bash
+uv run evolution.py --config evolution.toml
+
+# A CLI flag overrides the config value for every subject
+uv run evolution.py --config evolution.toml --crf 18
+```
+
+Rules:
+
+- Top-level keys set defaults for all subjects. A key inside `[[subjects]]` overrides the top-level value for that subject.
+- A CLI flag overrides both.
+- Relative paths resolve against the folder that contains the config file.
+- Allowed keys: `output_dir`, `seconds_per_photo`, `max_days`, `crf`, `resolution`, `subtitle`, `start_date` and `workers`. Each subject also takes `name` and `photos_dir`. An unknown key is an error.
+
 ## Options
 
 | Flag | Default | Description |
 |---|---|---|
-| `--photos-dir` | *(required)* | Folder containing dated photos for a single subject |
+| `--photos-dir` | *(required unless `--config`)* | Folder containing dated photos for a single subject |
+| `--config` | *(none)* | TOML configuration file. You cannot use it with `--photos-dir`. |
 | `--output-dir` | `./output` | Where to write the output video |
 | `--seconds-per-photo` | `2` | How long each photo is shown |
 | `--max-days` | *(photo count)* | Number of days to cover |

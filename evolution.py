@@ -13,6 +13,7 @@ Creates an "Evolution of <subject>" slideshow video from daily photos.
 
 Usage:
     uv run evolution.py --photos-dir ./photos/Emma --start-date 2024-01-15
+    uv run evolution.py --config evolution.toml
 
 Requirements:
     - uv (https://docs.astral.sh/uv/)
@@ -40,12 +41,12 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 # ─── CONFIG DEFAULTS ──────────────────────────────────────────────────────────
 SECONDS_PER_PHOTO = 2
 OUTPUT_DIR = "./output"
-MAX_DAYS = 183          # ~6 months — used only as fallback if inference is unavailable
 CRF = 23                # H.265 quality (18=high quality, 28=smaller file)
 RESOLUTION = "1920x1080"
 DEFAULT_WORKERS = min(os.cpu_count() or 4, 8)
@@ -245,21 +246,29 @@ def make_video(
     photos_dir: Path,
     output_dir: Path,
     seconds_per_photo: int = SECONDS_PER_PHOTO,
-    max_days: int = MAX_DAYS,
+    max_days: int | None = None,
     resolution: str = RESOLUTION,
     crf: int = CRF,
     start_date: datetime.date | None = None,
     subtitle: str | None = None,
     workers: int = DEFAULT_WORKERS,
+    subject_name: str | None = None,
 ) -> Path | None:
-    """Create an evolution video for one subject."""
-    subject_name = photos_dir.name
+    """Create an evolution video for one subject.
+
+    *subject_name* defaults to the photos folder name. *max_days* defaults
+    to the photo count.
+    """
+    subject_name = subject_name or photos_dir.name
     print(f"\n🎬 Creating video for {subject_name}...")
 
     photos = find_photos(photos_dir)
     if not photos:
         print(f"  ❌ No dated photos found in {photos_dir}")
         return None
+
+    if max_days is None:
+        max_days = len(photos)
 
     if start_date is not None:
         start = start_date
@@ -365,6 +374,73 @@ def make_video(
     return output_path
 
 
+# Settings allowed at the top level of a config file and inside each [[subjects]] table.
+# Each maps to the make_video() keyword and CLI flag of the same name.
+SETTING_KEYS = {
+    "output_dir", "seconds_per_photo", "max_days", "crf",
+    "resolution", "subtitle", "start_date", "workers",
+}
+SUBJECT_KEYS = {"name", "photos_dir"}
+BUILTIN_SETTINGS = {
+    "output_dir": Path(OUTPUT_DIR),
+    "seconds_per_photo": SECONDS_PER_PHOTO,
+    "max_days": None,
+    "crf": CRF,
+    "resolution": RESOLUTION,
+    "subtitle": None,
+    "start_date": None,
+    "workers": DEFAULT_WORKERS,
+}
+
+
+class ConfigError(Exception):
+    pass
+
+
+def _normalize_setting(key: str, value, base_dir: Path):
+    """Convert a raw TOML value to the type make_video() expects."""
+    if key in {"output_dir", "photos_dir"}:
+        return (base_dir / value).resolve()
+    if key == "start_date" and isinstance(value, str):
+        return datetime.date.fromisoformat(value)
+    return value
+
+
+def load_config(config_path: Path) -> list[dict]:
+    """Read a TOML config file and return one settings dict per subject.
+
+    Relative paths resolve against the config file's folder, so the config
+    works from any current directory. Per-subject values override top-level
+    values. Unknown keys are an error, to catch typos.
+    """
+    try:
+        with open(config_path, "rb") as f:
+            raw = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        raise ConfigError(f"Cannot read {config_path}: {e}") from e
+
+    base_dir = config_path.resolve().parent
+    subjects = raw.pop("subjects", None)
+    unknown = set(raw) - SETTING_KEYS
+    if unknown:
+        raise ConfigError(f"Unknown top-level keys: {', '.join(sorted(unknown))}")
+    if not isinstance(subjects, list) or not subjects:
+        raise ConfigError("Config needs at least one [[subjects]] table")
+
+    top = {k: _normalize_setting(k, v, base_dir) for k, v in raw.items()}
+    jobs = []
+    for i, subject in enumerate(subjects, start=1):
+        unknown = set(subject) - SETTING_KEYS - SUBJECT_KEYS
+        if unknown:
+            raise ConfigError(f"Subject #{i}: unknown keys: {', '.join(sorted(unknown))}")
+        if "photos_dir" not in subject:
+            raise ConfigError(f"Subject #{i}: missing required key 'photos_dir'")
+        job = dict(top)
+        job.update({k: _normalize_setting(k, v, base_dir) for k, v in subject.items()})
+        jobs.append(job)
+    return jobs
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate an 'Evolution of <subject>' slideshow video from daily photos.",
@@ -379,57 +455,71 @@ Examples:
 
   # Custom duration and quality:
   uv run evolution.py --photos-dir ./photos/Emma --seconds-per-photo 3 --crf 18
+
+  # One video per subject listed in a TOML config file:
+  uv run evolution.py --config evolution.toml
+
+  # CLI flags override config values for every subject:
+  uv run evolution.py --config evolution.toml --crf 18
         """,
     )
-    parser.add_argument("--photos-dir", type=Path, required=True,
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--photos-dir", type=Path,
                         help="Folder containing dated photos (YYYY-MM-DD.jpg) for a single subject.")
-    parser.add_argument("--output-dir", type=Path, default=Path(OUTPUT_DIR),
+    source.add_argument("--config", type=Path,
+                        help="TOML config file with one [[subjects]] table per subject. "
+                             "Relative paths resolve against the config file's folder.")
+    # Setting flags default to None so an explicit flag can override config values.
+    parser.add_argument("--output-dir", type=Path, default=None,
                         help=f"Where to save the output video (default: {OUTPUT_DIR})")
-    parser.add_argument("--seconds-per-photo", type=int, default=SECONDS_PER_PHOTO,
+    parser.add_argument("--seconds-per-photo", type=int, default=None,
                         help=f"Seconds each photo is displayed (default: {SECONDS_PER_PHOTO})")
     parser.add_argument("--max-days", type=int, default=None,
                         help="Maximum days to include (default: inferred from photo count). "
                              "Use to trim a long archive or cap at a milestone.")
-    parser.add_argument("--crf", type=int, default=CRF,
+    parser.add_argument("--crf", type=int, default=None,
                         help=f"H.265 CRF quality value — lower = better quality/larger file (default: {CRF})")
-    parser.add_argument("--resolution", type=str, default=RESOLUTION,
+    parser.add_argument("--resolution", type=str, default=None,
                         help=f"Output resolution WxH (default: {RESOLUTION})")
     parser.add_argument("--subtitle", type=str, default=None,
                         help="Override the title card subtitle (default: derived from --max-days, "
                              "e.g. 'First 6 months')")
-    parser.add_argument("--start-date", type=datetime.date.fromisoformat,
+    parser.add_argument("--start-date", type=datetime.date.fromisoformat, default=None,
                         help="Override the inferred start date (format: YYYY-MM-DD). "
                              "Defaults to the date of the earliest photo.")
-    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
+    parser.add_argument("--workers", type=int, default=None,
                         help=f"Number of parallel ffmpeg workers for clip rendering "
                              f"(default: {DEFAULT_WORKERS}). Use 1 to render sequentially.")
 
     args = parser.parse_args()
+
+    if args.config:
+        try:
+            jobs = load_config(args.config)
+        except ConfigError as e:
+            print(f"❌ {e}")
+            sys.exit(1)
+    else:
+        jobs = [{"photos_dir": args.photos_dir.resolve()}]
+
+    cli_settings = {k: getattr(args, k) for k in SETTING_KEYS if getattr(args, k) is not None}
+
     check_ffmpeg()
 
-    photos_dir = args.photos_dir.resolve()
-    output_dir = args.output_dir.resolve()
+    failed = []
+    for job in jobs:
+        settings = {**BUILTIN_SETTINGS, **job, **cli_settings}
+        photos_dir = settings.pop("photos_dir")
+        output_dir = settings.pop("output_dir").resolve()
+        result = make_video(photos_dir, output_dir, subject_name=settings.pop("name", None), **settings)
+        if result is None:
+            failed.append(photos_dir)
 
-    photos = find_photos(photos_dir)
-    if not photos:
-        print(f"❌ No dated photos found in {photos_dir}")
+    if failed:
+        print(f"\n❌ {len(failed)} of {len(jobs)} video(s) failed: "
+              + ", ".join(str(p) for p in failed))
         sys.exit(1)
-
-    max_days = args.max_days if args.max_days is not None else len(photos)
-
-    make_video(
-        photos_dir,
-        output_dir,
-        seconds_per_photo=args.seconds_per_photo,
-        max_days=max_days,
-        resolution=args.resolution,
-        crf=args.crf,
-        start_date=args.start_date,
-        subtitle=args.subtitle,
-        workers=args.workers,
-    )
-
-    print(f"\n🎉 All done! Video saved to: {output_dir}")
+    print(f"\n🎉 All done! {len(jobs)} video(s) saved.")
 
 
 if __name__ == "__main__":
