@@ -14,6 +14,7 @@ Creates an "Evolution of <subject>" slideshow video from daily photos.
 Usage:
     uv run evolution.py --photos-dir ./photos/Emma --start-date 2024-01-15
     uv run evolution.py --config evolution.toml
+    uv run evolution.py --config evolution.toml --combined
 
 Requirements:
     - uv (https://docs.astral.sh/uv/)
@@ -37,12 +38,15 @@ Configuration (edit the CONFIG section below or use CLI flags):
 import argparse
 import concurrent.futures
 import datetime
+import functools
 import os
 import subprocess
 import sys
 import tempfile
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 # ─── CONFIG DEFAULTS ──────────────────────────────────────────────────────────
 SECONDS_PER_PHOTO = 2
@@ -54,7 +58,8 @@ DEFAULT_WORKERS = min(os.cpu_count() or 4, 8)
 FONT_SIZE_SINGLE = 64   # age label
 FONT_SIZE_TITLE = 96
 FONT_SIZE_SUBTITLE = 52
-FONT_SIZE_SUMMARY = 48  # summary slide labels
+FONT_SIZE_SUMMARY = 48  # summary slide and combined video age labels
+FONT_SIZE_NAME = 36     # subject name at the top of a combined video panel
 TITLE_DURATION = 3      # seconds for title card (fade in + hold + fade out)
 TITLE_FADE = 0.6        # seconds for fade in/out
 # ──────────────────────────────────────────────────────────────────────────────
@@ -254,6 +259,81 @@ def make_title_card(
     return output_path
 
 
+class GridCell(NamedTuple):
+    """One panel of a grid clip. A cell with no photo renders as black."""
+    photo: Path | None
+    top_label: str | None = None
+    bottom_label: str | None = None
+
+
+def _encode_args(crf: int, seconds: int) -> list[str]:
+    """Output options shared by every clip so the final concat can use -c copy."""
+    return [
+        "-c:v", "libx265",
+        "-crf", str(crf),
+        "-t", str(seconds),
+        "-pix_fmt", "yuv420p",
+        "-tag:v", "hvc1",
+        "-r", str(FPS),
+    ]
+
+
+def make_grid_clip(
+    cells: list[list[GridCell]],
+    output_path: Path,
+    resolution: str = RESOLUTION,
+    seconds: int = SECONDS_PER_PHOTO,
+    crf: int = CRF,
+    top_font_size: int = FONT_SIZE_NAME,
+    bottom_font_size: int = FONT_SIZE_SUMMARY,
+) -> Path:
+    """Render a clip of photos in a rows x cols grid, each with optional labels.
+
+    Each photo is pillarboxed (black bars, no crop) into its cell. The top
+    label sits at the top of its cell and the bottom label at the bottom.
+    """
+    w, h = (int(v) for v in resolution.split("x"))
+    rows, cols = len(cells), len(cells[0])
+    cell_w, cell_h = w // cols, h // rows
+
+    inputs: list[str] = []
+    parts: list[str] = []
+    drawtexts: list[str] = []
+    label_style = "fontcolor=white:bordercolor=black:borderw=3"
+    for r, row in enumerate(cells):
+        for c, cell in enumerate(row):
+            i = r * cols + c
+            if cell.photo is None:
+                inputs += ["-f", "lavfi", "-i", f"color=black:s={cell_w}x{cell_h}:r={FPS}"]
+            else:
+                inputs += ["-loop", "1", "-i", str(cell.photo)]
+            parts.append(
+                f"[{i}:v]scale={cell_w}:{cell_h}:force_original_aspect_ratio=decrease,"
+                f"pad={cell_w}:{cell_h}:(ow-iw)/2:(oh-ih)/2:black[c{i}]"
+            )
+            x = f"{c * cell_w}+({cell_w}-text_w)/2"
+            if cell.top_label:
+                drawtexts.append(
+                    f"drawtext=text='{ffmpeg_escape(cell.top_label)}':fontsize={top_font_size}:"
+                    f"{label_style}:x={x}:y={r * cell_h + 20}"
+                )
+            if cell.bottom_label:
+                drawtexts.append(
+                    f"drawtext=text='{ffmpeg_escape(cell.bottom_label)}':fontsize={bottom_font_size}:"
+                    f"{label_style}:x={x}:y={(r + 1) * cell_h}-text_h-40"
+                )
+        row_inputs = "".join(f"[c{r * cols + c}]" for c in range(cols))
+        parts.append(f"{row_inputs}hstack=inputs={cols}[r{r}]" if cols > 1 else f"{row_inputs}null[r{r}]")
+    row_outputs = "".join(f"[r{r}]" for r in range(rows))
+    stack = f"{row_outputs}vstack=inputs={rows}" if rows > 1 else f"{row_outputs}null"
+    parts.append(",".join([stack, *drawtexts]))
+
+    cmd = ["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(parts),
+           *_encode_args(crf, seconds), str(output_path)]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return output_path
+
+
 def make_summary_slide(
     first_jpeg: Path,
     last_jpeg: Path,
@@ -264,41 +344,75 @@ def make_summary_slide(
     seconds_per_photo: int = SECONDS_PER_PHOTO,
     crf: int = CRF,
 ) -> Path:
-    """Render a side-by-side clip of the first and last photos with age labels.
+    """Render a side-by-side clip of the first and last photos with age labels."""
+    cells = [[GridCell(first_jpeg, bottom_label=first_age_label),
+              GridCell(last_jpeg, bottom_label=last_age_label)]]
+    return make_grid_clip(cells, output_path, resolution=resolution,
+                          seconds=seconds_per_photo, crf=crf)
 
-    Each photo is pillarboxed (black bars, no crop) into half the frame width.
+
+def load_subject(photos_dir: Path, start_date: datetime.date | None):
+    """Return (start_date, photos) for a folder, or None if it has no dated photos."""
+    photos = find_photos(photos_dir)
+    if not photos:
+        print(f"  ❌ No dated photos found in {photos_dir}")
+        return None
+    if start_date is not None:
+        print(f"  📅 Start date (provided): {start_date} ({len(photos)} photos found)")
+        return start_date, photos
+    start = start_date_from_photos(photos)
+    print(f"  📅 Start date (inferred): {start} ({len(photos)} photos found)")
+    return start, photos
+
+
+def photos_by_day(
+    photos: list[tuple[datetime.date, Path]],
+    start: datetime.date,
+    max_days: int,
+) -> list[tuple[datetime.date, Path | None]]:
+    """Return (date, photo) for each of days 1..max_days counted from *start*.
+
+    A day with no photo reuses the last known photo. Days before the first
+    photo get None.
     """
-    w, h = (int(v) for v in resolution.split("x"))
-    half_w = w // 2
-    label_style = (
-        f"fontsize={FONT_SIZE_SUMMARY}:"
-        f"fontcolor=white:"
-        f"bordercolor=black:borderw=3:"
-        f"y=h-text_h-40"
-    )
-    panel = f"scale={half_w}:{h}:force_original_aspect_ratio=decrease,pad={half_w}:{h}:(ow-iw)/2:(oh-ih)/2:black"
-    filter_complex = (
-        f"[0:v]{panel}[left];"
-        f"[1:v]{panel}[right];"
-        f"[left][right]hstack=inputs=2,"
-        f"drawtext=text='{ffmpeg_escape(first_age_label)}':{label_style}:x=({half_w}-text_w)/2,"
-        f"drawtext=text='{ffmpeg_escape(last_age_label)}':{label_style}:x={half_w}+({half_w}-text_w)/2"
-    )
+    photo_map = dict(photos)
+    days = []
+    last_photo = None
+    for day_num in range(1, max_days + 1):
+        current_date = start + datetime.timedelta(days=day_num - 1)
+        last_photo = photo_map.get(current_date, last_photo)
+        days.append((current_date, last_photo))
+    return days
+
+
+def render_clips(jobs: list[Callable[[], None]], workers: int) -> None:
+    """Run clip render jobs in parallel with a progress bar."""
+    total = len(jobs)
+    print(f"  🚀 Rendering {total} day clips with {workers} worker(s)...")
+    completed = 0
+    print_progress(0, total)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        for future in concurrent.futures.as_completed(executor.submit(job) for job in jobs):
+            future.result()  # re-raise any subprocess exception
+            completed += 1
+            print_progress(completed, total)
+    if sys.stdout.isatty():
+        print()  # move past the progress bar line
+
+
+def concat_clips(clips: list[Path], list_path: Path, output_path: Path) -> None:
+    """Join clips in order without re-encoding."""
+    with open(list_path, "w") as f:
+        for clip in clips:
+            f.write(f"file '{clip}'\n")
     cmd = [
         "ffmpeg", "-y",
-        "-loop", "1", "-i", str(first_jpeg),
-        "-loop", "1", "-i", str(last_jpeg),
-        "-filter_complex", filter_complex,
-        "-c:v", "libx265",
-        "-crf", str(crf),
-        "-t", str(seconds_per_photo),
-        "-pix_fmt", "yuv420p",
-        "-tag:v", "hvc1",
-        "-r", str(FPS),
+        "-f", "concat", "-safe", "0",
+        "-i", str(list_path),
+        "-c", "copy",
         str(output_path),
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return output_path
 
 
 def make_video(
@@ -321,62 +435,33 @@ def make_video(
     subject_name = subject_name or photos_dir.name
     print(f"\n🎬 Creating video for {subject_name}...")
 
-    photos = find_photos(photos_dir)
-    if not photos:
-        print(f"  ❌ No dated photos found in {photos_dir}")
+    loaded = load_subject(photos_dir, start_date)
+    if loaded is None:
         return None
-
+    start, photos = loaded
     if max_days is None:
         max_days = len(photos)
-
-    if start_date is not None:
-        start = start_date
-        print(f"  📅 Start date (provided): {start} ({len(photos)} photos found)")
-    else:
-        start = start_date_from_photos(photos)
-        print(f"  📅 Start date (inferred): {start} ({len(photos)} photos found)")
-
-    # Build a lookup: date → path
-    photo_map = {date: path for date, path in photos}
 
     w, h = resolution.split("x")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
-        clip_list_path = tmpdir / "clips.txt"
 
-        # Title card (sequential — single call, no parallelism benefit)
         title_path = tmpdir / "title.mp4"
         make_title_card(subject_name, title_path, resolution=resolution, crf=crf,
                         subtitle=subtitle or subtitle_from_max_days(max_days))
 
-        # Build ordered work list and pre-convert any HEIC files sequentially
-        # (ensure_jpeg is not thread-safe for the same source file, so do it here)
-        work_items: list[tuple[int, Path, str, Path]] = []  # (day_num, clip_path, age_label, jpeg_path)
-        last_photo = None
-        for day_num in range(1, max_days + 1):
-            current_date = start + datetime.timedelta(days=day_num - 1)
-            photo = photo_map.get(current_date)
-
-            if photo:
-                last_photo = photo
-            elif last_photo:
-                # Use previous day's photo if missing
-                photo = last_photo
-            else:
+        # Pre-convert HEIC files sequentially: ensure_jpeg is not thread-safe
+        # for the same source file.
+        work_items: list[tuple[Path, str, Path]] = []  # (clip_path, age_label, jpeg_path)
+        for day_num, (current_date, photo) in enumerate(photos_by_day(photos, start, max_days), start=1):
+            if photo is None:
                 continue  # No photo yet (shouldn't happen if start date is correct)
-
-            age_label = format_age(current_date, start)
             clip_path = tmpdir / f"clip_{day_num:04d}.mp4"
-            jpeg_path = ensure_jpeg(photo, tmpdir)  # HEIC conversion here (deduped, sequential)
-            work_items.append((day_num, clip_path, age_label, jpeg_path))
+            work_items.append((clip_path, format_age(current_date, start), ensure_jpeg(photo, tmpdir)))
 
-        total_clips = len(work_items)
-        print(f"  🚀 Rendering {total_clips} day clips with {workers} worker(s)...")
-
-        def render_clip(item: tuple[int, Path, str, Path]) -> None:
-            _, clip_path, age_label, jpeg_path = item
+        def render_clip(clip_path: Path, age_label: str, jpeg_path: Path) -> None:
             vf = (
                 f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
                 f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,"
@@ -391,55 +476,129 @@ def make_video(
                 "ffmpeg", "-y",
                 "-loop", "1", "-i", str(jpeg_path),
                 "-vf", vf,
-                "-c:v", "libx265",
-                "-crf", str(crf),
-                "-t", str(seconds_per_photo),
-                "-pix_fmt", "yuv420p",
-                "-tag:v", "hvc1",
-                "-r", str(FPS),
+                *_encode_args(crf, seconds_per_photo),
                 str(clip_path),
             ]
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        completed = 0
-        print_progress(0, total_clips)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(render_clip, item): item[0] for item in work_items}
-            for future in concurrent.futures.as_completed(futures):
-                future.result()  # re-raise any subprocess exception
-                completed += 1
-                print_progress(completed, total_clips)
-        if sys.stdout.isatty():
-            print()  # move past the progress bar line
+        render_clips([functools.partial(render_clip, *item) for item in work_items], workers)
 
-        # Write concat list in day order after all clips are ready
-        with open(clip_list_path, "w") as concat_f:
-            concat_f.write(f"file '{title_path}'\n")
-            for _, clip_path, _, _ in work_items:
-                concat_f.write(f"file '{clip_path}'\n")
-
+        total_clips = len(work_items)
         output_path = output_dir / f"evolution_{subject_name}.mp4"
         print(f"  🔗 Concatenating {total_clips + 1} clips (1 title card + {total_clips} day clips)...")
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0",
-            "-i", str(clip_list_path),
-            "-c", "copy",
-            str(output_path),
-        ]
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        concat_clips([title_path, *(clip for clip, _, _ in work_items)],
+                     tmpdir / "clips.txt", output_path)
 
     print(f"  ✨ Done! → {output_path}")
     return output_path
 
 
-# Settings allowed at the top level of a config file and inside each [[subjects]] table.
-# Each maps to the make_video() keyword and CLI flag of the same name.
-SETTING_KEYS = {
-    "output_dir", "seconds_per_photo", "max_days", "crf",
-    "resolution", "subtitle", "start_date", "workers",
-}
-SUBJECT_KEYS = {"name", "photos_dir"}
+class Subject(NamedTuple):
+    name: str
+    photos_dir: Path
+    start_date: datetime.date | None = None
+
+
+def make_combined_video(
+    left: Subject,
+    right: Subject,
+    output_dir: Path,
+    seconds_per_photo: int = SECONDS_PER_PHOTO,
+    max_days: int | None = None,
+    resolution: str = RESOLUTION,
+    crf: int = CRF,
+    subtitle: str | None = None,
+    workers: int = DEFAULT_WORKERS,
+) -> Path | None:
+    """Create a side-by-side evolution video of two subjects, ending in a 2x2 summary.
+
+    Day N of each panel counts from that subject's own start date.
+    *max_days* defaults to the larger photo count: the subject with fewer
+    photos repeats its last photo until the end.
+    """
+    print(f"\n🎬 Creating combined video for {left.name} & {right.name}...")
+    loaded = []
+    for subject in (left, right):
+        print(f"  {subject.name}:")
+        result = load_subject(subject.photos_dir, subject.start_date)
+        if result is None:
+            return None
+        loaded.append(result)
+    (left_start, left_photos), (right_start, right_photos) = loaded
+
+    if max_days is None:
+        max_days = max(len(left_photos), len(right_photos))
+        print(f"  📊 Photo counts: {left.name}={len(left_photos)}, {right.name}={len(right_photos)}"
+              f" → {max_days} days")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+
+        title_path = tmpdir / "title.mp4"
+        make_title_card(f"{left.name} & {right.name}", title_path, resolution=resolution, crf=crf,
+                        subtitle=subtitle or subtitle_from_max_days(max_days))
+
+        def panel(subject: Subject, start: datetime.date, day: tuple[datetime.date, Path | None]) -> GridCell:
+            current_date, photo = day
+            if photo is None:
+                return GridCell(None, top_label=subject.name)
+            return GridCell(ensure_jpeg(photo, tmpdir), subject.name, format_age(current_date, start))
+
+        # Pre-convert HEIC files sequentially: ensure_jpeg is not thread-safe
+        # for the same source file.
+        work_items: list[tuple[Path, list[list[GridCell]]]] = []
+        days = zip(photos_by_day(left_photos, left_start, max_days),
+                   photos_by_day(right_photos, right_start, max_days))
+        for day_num, (left_day, right_day) in enumerate(days, start=1):
+            if left_day[1] is None and right_day[1] is None:
+                continue
+            cells = [[panel(left, left_start, left_day), panel(right, right_start, right_day)]]
+            work_items.append((tmpdir / f"clip_{day_num:04d}.mp4", cells))
+
+        render_clips(
+            [functools.partial(make_grid_clip, cells, clip_path, resolution=resolution,
+                               seconds=seconds_per_photo, crf=crf)
+             for clip_path, cells in work_items],
+            workers,
+        )
+
+        # Summary: subjects as columns, first photo on the top row, last photo on the bottom.
+        first_row, last_row = [], []
+        end = datetime.timedelta(days=max_days)
+        for subject, (start, photos) in ((left, loaded[0]), (right, loaded[1])):
+            shown = [(d, p) for d, p in photos if start <= d < start + end]
+            if not shown:
+                first_row.append(GridCell(None, top_label=subject.name))
+                last_row.append(GridCell(None, top_label=subject.name))
+                continue
+            for row, (photo_date, photo) in ((first_row, shown[0]), (last_row, shown[-1])):
+                row.append(GridCell(ensure_jpeg(photo, tmpdir), subject.name,
+                                    format_age(photo_date, start)))
+        summary_path = make_grid_clip([first_row, last_row], tmpdir / "summary.mp4",
+                                      resolution=resolution, seconds=seconds_per_photo, crf=crf)
+
+        total_clips = len(work_items)
+        output_path = output_dir / f"evolution_{left.name}_{right.name}_combined.mp4"
+        print(f"  🔗 Concatenating {total_clips + 2} clips "
+              f"(1 title card + {total_clips} day clips + 1 summary)...")
+        concat_clips([title_path, *(clip for clip, _ in work_items), summary_path],
+                     tmpdir / "clips.txt", output_path)
+
+    print(f"  ✨ Done! → {output_path}")
+    return output_path
+
+
+# Config keys. Each setting maps to the make_video() keyword and CLI flag of the same name.
+# Encoding and output settings are top-level only, so a combined video has one
+# clear value for each.
+TOP_LEVEL_ONLY_KEYS = {"output_dir", "seconds_per_photo", "crf", "resolution", "workers", "combined"}
+# Allowed at the top level (as a default for every subject) and per subject.
+SUBJECT_SETTING_KEYS = {"max_days", "subtitle", "start_date"}
+SUBJECT_ONLY_KEYS = {"name", "photos_dir"}
+SETTING_KEYS = (TOP_LEVEL_ONLY_KEYS - {"combined"}) | SUBJECT_SETTING_KEYS
+COMBINED_MODES = {"also", "only"}
 BUILTIN_SETTINGS = {
     "output_dir": Path(OUTPUT_DIR),
     "seconds_per_photo": SECONDS_PER_PHOTO,
@@ -465,12 +624,13 @@ def _normalize_setting(key: str, value, base_dir: Path):
     return value
 
 
-def load_config(config_path: Path) -> list[dict]:
-    """Read a TOML config file and return one settings dict per subject.
+def load_config(config_path: Path) -> tuple[dict, list[dict]]:
+    """Read a TOML config file and return (top_level_settings, subject_jobs).
 
-    Relative paths resolve against the config file's folder, so the config
-    works from any current directory. Per-subject values override top-level
-    values. Unknown keys are an error, to catch typos.
+    Each job merges the top-level settings (except 'combined') with the
+    subject's own keys. Relative paths resolve against the config file's
+    folder, so the config works from any current directory. Unknown keys
+    are an error, to catch typos.
     """
     try:
         with open(config_path, "rb") as f:
@@ -480,24 +640,29 @@ def load_config(config_path: Path) -> list[dict]:
 
     base_dir = config_path.resolve().parent
     subjects = raw.pop("subjects", None)
-    unknown = set(raw) - SETTING_KEYS
+    unknown = set(raw) - TOP_LEVEL_ONLY_KEYS - SUBJECT_SETTING_KEYS
     if unknown:
         raise ConfigError(f"Unknown top-level keys: {', '.join(sorted(unknown))}")
+    if "combined" in raw and raw["combined"] not in COMBINED_MODES:
+        raise ConfigError(f"'combined' must be one of: {', '.join(sorted(COMBINED_MODES))}")
     if not isinstance(subjects, list) or not subjects:
         raise ConfigError("Config needs at least one [[subjects]] table")
 
     top = {k: _normalize_setting(k, v, base_dir) for k, v in raw.items()}
     jobs = []
     for i, subject in enumerate(subjects, start=1):
-        unknown = set(subject) - SETTING_KEYS - SUBJECT_KEYS
+        top_only = set(subject) & TOP_LEVEL_ONLY_KEYS
+        if top_only:
+            raise ConfigError(f"Subject #{i}: only allowed at the top level: {', '.join(sorted(top_only))}")
+        unknown = set(subject) - SUBJECT_SETTING_KEYS - SUBJECT_ONLY_KEYS
         if unknown:
             raise ConfigError(f"Subject #{i}: unknown keys: {', '.join(sorted(unknown))}")
         if "photos_dir" not in subject:
             raise ConfigError(f"Subject #{i}: missing required key 'photos_dir'")
-        job = dict(top)
+        job = {k: v for k, v in top.items() if k != "combined"}
         job.update({k: _normalize_setting(k, v, base_dir) for k, v in subject.items()})
         jobs.append(job)
-    return jobs
+    return top, jobs
 
 
 def main():
@@ -520,6 +685,9 @@ Examples:
 
   # CLI flags override config values for every subject:
   uv run evolution.py --config evolution.toml --crf 18
+
+  # Side-by-side video of the 2 subjects in the config, plus their own videos:
+  uv run evolution.py --config evolution.toml --combined
         """,
     )
     source = parser.add_mutually_exclusive_group(required=True)
@@ -528,13 +696,20 @@ Examples:
     source.add_argument("--config", type=Path,
                         help="TOML config file with one [[subjects]] table per subject. "
                              "Relative paths resolve against the config file's folder.")
+    combined = parser.add_mutually_exclusive_group()
+    combined.add_argument("--combined", dest="combined", action="store_const", const="also",
+                          help="Also make a side-by-side video of the 2 config subjects "
+                               "(first = left, second = right). Needs --config.")
+    combined.add_argument("--combined-only", dest="combined", action="store_const", const="only",
+                          help="Make only the side-by-side video. Needs --config.")
     # Setting flags default to None so an explicit flag can override config values.
     parser.add_argument("--output-dir", type=Path, default=None,
                         help=f"Where to save the output video (default: {OUTPUT_DIR})")
     parser.add_argument("--seconds-per-photo", type=int, default=None,
                         help=f"Seconds each photo is displayed (default: {SECONDS_PER_PHOTO})")
     parser.add_argument("--max-days", type=int, default=None,
-                        help="Maximum days to include (default: inferred from photo count). "
+                        help="Maximum days to include (default: inferred from photo count; "
+                             "the larger count for a combined video). "
                              "Use to trim a long archive or cap at a milestone.")
     parser.add_argument("--crf", type=int, default=None,
                         help=f"H.265 CRF quality value — lower = better quality/larger file (default: {CRF})")
@@ -554,31 +729,59 @@ Examples:
 
     if args.config:
         try:
-            jobs = load_config(args.config)
+            top, jobs = load_config(args.config)
         except ConfigError as e:
             print(f"❌ {e}")
             sys.exit(1)
     else:
-        jobs = [{"photos_dir": args.photos_dir.resolve()}]
+        top, jobs = {}, [{"photos_dir": args.photos_dir.resolve()}]
+
+    combined_mode = args.combined or top.get("combined")
+    if combined_mode and len(jobs) != 2:
+        print("❌ A combined video needs --config with exactly 2 [[subjects]] "
+              f"(found {len(jobs) if args.config else 0}).")
+        sys.exit(1)
 
     cli_settings = {k: getattr(args, k) for k in SETTING_KEYS if getattr(args, k) is not None}
 
     check_ffmpeg()
 
     failed = []
-    for job in jobs:
-        settings = {**BUILTIN_SETTINGS, **job, **cli_settings}
-        photos_dir = settings.pop("photos_dir")
-        output_dir = settings.pop("output_dir").resolve()
-        result = make_video(photos_dir, output_dir, subject_name=settings.pop("name", None), **settings)
-        if result is None:
-            failed.append(photos_dir)
+    if combined_mode != "only":
+        for job in jobs:
+            settings = {**BUILTIN_SETTINGS, **job, **cli_settings}
+            photos_dir = settings.pop("photos_dir")
+            output_dir = settings.pop("output_dir").resolve()
+            result = make_video(photos_dir, output_dir, subject_name=settings.pop("name", None), **settings)
+            if result is None:
+                failed.append(str(photos_dir))
 
+    if combined_mode:
+        # The combined video uses top-level and CLI settings. Per-subject
+        # max_days and subtitle apply only to that subject's own video.
+        shared = {**BUILTIN_SETTINGS, **{k: v for k, v in top.items() if k != "combined"}, **cli_settings}
+        left, right = (
+            Subject(job.get("name") or job["photos_dir"].name, job["photos_dir"],
+                    cli_settings.get("start_date", job.get("start_date")))
+            for job in jobs
+        )
+        result = make_combined_video(
+            left, right, shared["output_dir"].resolve(),
+            seconds_per_photo=shared["seconds_per_photo"],
+            max_days=shared["max_days"],
+            resolution=shared["resolution"],
+            crf=shared["crf"],
+            subtitle=shared["subtitle"],
+            workers=shared["workers"],
+        )
+        if result is None:
+            failed.append(f"combined {left.name} & {right.name}")
+
+    total = (0 if combined_mode == "only" else len(jobs)) + (1 if combined_mode else 0)
     if failed:
-        print(f"\n❌ {len(failed)} of {len(jobs)} video(s) failed: "
-              + ", ".join(str(p) for p in failed))
+        print(f"\n❌ {len(failed)} of {total} video(s) failed: " + ", ".join(failed))
         sys.exit(1)
-    print(f"\n🎉 All done! {len(jobs)} video(s) saved.")
+    print(f"\n🎉 All done! {total} video(s) saved.")
 
 
 if __name__ == "__main__":
