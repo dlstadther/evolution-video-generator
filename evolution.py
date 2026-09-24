@@ -53,6 +53,7 @@ DEFAULT_WORKERS = min(os.cpu_count() or 4, 8)
 FONT_SIZE_SINGLE = 64   # age label
 FONT_SIZE_TITLE = 96
 FONT_SIZE_SUBTITLE = 52
+FONT_SIZE_SUMMARY = 48  # summary slide labels
 TITLE_DURATION = 3      # seconds for title card (fade in + hold + fade out)
 TITLE_FADE = 0.6        # seconds for fade in/out
 # ──────────────────────────────────────────────────────────────────────────────
@@ -236,6 +237,53 @@ def make_title_card(
         "-pix_fmt", "yuv420p",
         "-tag:v", "hvc1",
         "-t", str(duration),
+        str(output_path),
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return output_path
+
+
+def make_summary_slide(
+    first_jpeg: Path,
+    last_jpeg: Path,
+    first_age_label: str,
+    last_age_label: str,
+    output_path: Path,
+    resolution: str = RESOLUTION,
+    seconds_per_photo: int = SECONDS_PER_PHOTO,
+    crf: int = CRF,
+) -> Path:
+    """Render a side-by-side clip of the first and last photos with age labels.
+
+    Each photo is pillarboxed (black bars, no crop) into half the frame width.
+    """
+    w, h = (int(v) for v in resolution.split("x"))
+    half_w = w // 2
+    label_style = (
+        f"fontsize={FONT_SIZE_SUMMARY}:"
+        f"fontcolor=white:"
+        f"bordercolor=black:borderw=3:"
+        f"y=h-text_h-40"
+    )
+    panel = f"scale={half_w}:{h}:force_original_aspect_ratio=decrease,pad={half_w}:{h}:(ow-iw)/2:(oh-ih)/2:black"
+    filter_complex = (
+        f"[0:v]{panel}[left];"
+        f"[1:v]{panel}[right];"
+        f"[left][right]hstack=inputs=2,"
+        f"drawtext=text='{ffmpeg_escape(first_age_label)}':{label_style}:x=({half_w}-text_w)/2,"
+        f"drawtext=text='{ffmpeg_escape(last_age_label)}':{label_style}:x={half_w}+({half_w}-text_w)/2"
+    )
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-i", str(first_jpeg),
+        "-loop", "1", "-i", str(last_jpeg),
+        "-filter_complex", filter_complex,
+        "-c:v", "libx265",
+        "-crf", str(crf),
+        "-t", str(seconds_per_photo),
+        "-pix_fmt", "yuv420p",
+        "-tag:v", "hvc1",
+        "-r", "30",
         str(output_path),
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
