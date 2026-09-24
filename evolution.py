@@ -49,6 +49,7 @@ SECONDS_PER_PHOTO = 2
 OUTPUT_DIR = "./output"
 CRF = 23                # H.265 quality (18=high quality, 28=smaller file)
 RESOLUTION = "1920x1080"
+FPS = 30                # every clip must match: the final concat uses -c copy
 DEFAULT_WORKERS = min(os.cpu_count() or 4, 8)
 FONT_SIZE_SINGLE = 64   # age label
 FONT_SIZE_TITLE = 96
@@ -224,7 +225,7 @@ def make_title_card(
 
     # Two drawtext filters: title + subtitle
     title_filter = (
-        f"color=black:s={resolution}:d={duration}[base];"
+        f"color=black:s={resolution}:d={duration}:r={FPS}[base];"
         f"[base]drawtext="
         f"text='{ffmpeg_escape(title_text)}':"
         f"fontsize={FONT_SIZE_TITLE}:"
@@ -293,7 +294,7 @@ def make_summary_slide(
         "-t", str(seconds_per_photo),
         "-pix_fmt", "yuv420p",
         "-tag:v", "hvc1",
-        "-r", "30",
+        "-r", str(FPS),
         str(output_path),
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -395,7 +396,7 @@ def make_video(
                 "-t", str(seconds_per_photo),
                 "-pix_fmt", "yuv420p",
                 "-tag:v", "hvc1",
-                "-r", "30",
+                "-r", str(FPS),
                 str(clip_path),
             ]
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
