@@ -168,9 +168,19 @@ def start_date_from_photos(photos: list[tuple[datetime.date, Path]]) -> datetime
 
 
 def ffmpeg_escape(text: str) -> str:
-    """Escape text for ffmpeg drawtext filter."""
-    # Backslash must be escaped first so it doesn't corrupt the sequences added below.
-    return text.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
+    """Escape text for a drawtext value written as text='<result>'.
+
+    ffmpeg unescapes the value three times, so escape in reverse order:
+      1. drawtext text expansion: backslash and % are special.
+      2. filter option parser: backslash, quote and : are special.
+      3. filtergraph parser: inside '...' nothing can be escaped, so each
+         quote closes the string, adds an escaped quote, and reopens it.
+    In each step, backslash is escaped first so it doesn't corrupt the
+    sequences added after it.
+    """
+    text = text.replace("\\", "\\\\").replace("%", "\\%")
+    text = text.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
+    return text.replace("'", "'\\''")
 
 
 def print_progress(completed: int, total: int, bar_width: int = 30) -> None:
