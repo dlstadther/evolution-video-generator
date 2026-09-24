@@ -7,12 +7,12 @@
 # ]
 # ///
 """
-Baby Evolution Video Generator
-================================
+Evolution Video Generator
+=========================
 Creates an "Evolution of <subject>" slideshow video from daily photos.
 
 Usage:
-    uv run baby_evolution.py --photos-dir ./photos/Emma --birth-date 2024-01-15
+    uv run evolution.py --photos-dir ./photos/Emma --start-date 2024-01-15
 
 Requirements:
     - uv (https://docs.astral.sh/uv/)
@@ -21,14 +21,14 @@ Requirements:
 Folder structure expected:
     photos/
         Emma/
-            2024-01-15.jpg   ← birth date = day 1
+            2024-01-15.jpg   ← start date = day 0
             2024-01-16.jpg
             ...
 
 Configuration (edit the CONFIG section below or use CLI flags):
     --seconds-per-photo   Duration each photo is shown (default: 2)
     --output-dir          Where to write output videos (default: ./output)
-    --max-days            Cap at N days of life (default: inferred from photo count)
+    --max-days            Cap at N days (default: inferred from photo count)
     --crf                 H.265 quality, lower = better (default: 23)
     --resolution          Output resolution WxH (default: 1920x1080)
 """
@@ -57,17 +57,17 @@ TITLE_FADE = 0.6        # seconds for fade in/out
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def format_age(current_date: datetime.date, birth_date: datetime.date) -> str:
+def format_age(current_date: datetime.date, start_date: datetime.date) -> str:
     """Return a human-readable age string for a photo taken on *current_date*.
 
     Uses calendar-aware month arithmetic so that exact month anniversaries
-    (e.g. the 6-month birthday) display as "6 months" rather than drifting
+    (e.g. the 6-month mark) display as "6 months" rather than drifting
     by several days due to fixed 30-day month approximations.
 
     Within each month, remaining days are broken down into weeks and days.
 
-    Examples (birth_date = 2024-05-19):
-        2024-05-19  → "Birth"
+    Examples (start_date = 2024-05-19):
+        2024-05-19  → "Day 0"
         2024-05-20  → "1 day"
         2024-05-26  → "1 week"
         2024-05-27  → "1 week 1 day"
@@ -77,15 +77,15 @@ def format_age(current_date: datetime.date, birth_date: datetime.date) -> str:
         2024-11-19  → "6 months"      ← exact 6-month anniversary
         2024-11-26  → "6 months 1 week"
     """
-    if current_date <= birth_date:
-        return "Birth"
+    if current_date <= start_date:
+        return "Day 0"
 
     # Whole calendar months elapsed
     months = (
-        (current_date.year - birth_date.year) * 12
-        + (current_date.month - birth_date.month)
+        (current_date.year - start_date.year) * 12
+        + (current_date.month - start_date.month)
     )
-    day_diff = current_date.day - birth_date.day
+    day_diff = current_date.day - start_date.day
 
     if day_diff < 0:
         # Borrow from the previous month using its actual day count
@@ -104,26 +104,27 @@ def format_age(current_date: datetime.date, birth_date: datetime.date) -> str:
     if days:
         parts.append(f"{days} day{'s' if days != 1 else ''}")
 
-    return " ".join(parts) if parts else "Birth"
+    return " ".join(parts) if parts else "Day 0"
 
 
 def subtitle_from_max_days(max_days: int) -> str:
     """Derive a human-readable title card subtitle from a max_days value.
 
     Examples:
-        30  → "Birth to 1 month"
-        180 → "Birth to 6 months"
-        183 → "Birth to 183 days"  (183 % 30 != 0; use 180 for clean "6 months")
-        365 → "Birth to 1 year"
-        400 → "Birth to 400 days"
+        30  → "First month"
+        180 → "First 6 months"
+        183 → "First 183 days"  (183 % 30 != 0; use 180 for clean "6 months")
+        365 → "First year"
+        730 → "First 2 years"
+        400 → "First 400 days"
     """
     if max_days % 365 == 0:
         years = max_days // 365
-        return f"Birth to {years} year{'s' if years != 1 else ''}"
+        return "First year" if years == 1 else f"First {years} years"
     if max_days % 30 == 0:
         months = max_days // 30
-        return f"Birth to {months} month{'s' if months != 1 else ''}"
-    return f"Birth to {max_days} days"
+        return "First month" if months == 1 else f"First {months} months"
+    return f"First {max_days} days"
 
 
 def ensure_jpeg(photo: Path, tmpdir: Path) -> Path:
@@ -159,8 +160,8 @@ def find_photos(photos_dir: Path) -> list[tuple[datetime.date, Path]]:
     return sorted(photos, key=lambda x: x[0])
 
 
-def birth_date_from_photos(photos: list[tuple[datetime.date, Path]]) -> datetime.date:
-    """Infer birth date as the earliest photo date."""
+def start_date_from_photos(photos: list[tuple[datetime.date, Path]]) -> datetime.date:
+    """Infer the start date as the earliest photo date."""
     return photos[0][0]
 
 
@@ -196,7 +197,7 @@ def check_ffmpeg():
 
 
 def make_title_card(
-    child_name: str,
+    subject_name: str,
     output_path: Path,
     resolution: str = RESOLUTION,
     duration: int = TITLE_DURATION,
@@ -207,7 +208,7 @@ def make_title_card(
     """Generate a title card video with fade in/out on black background."""
     w, h = resolution.split("x")
     subtitle_text = subtitle or ""
-    title_text = f"Evolution of {child_name}"
+    title_text = f"Evolution of {subject_name}"
 
     # Two drawtext filters: title + subtitle
     title_filter = (
@@ -240,32 +241,32 @@ def make_title_card(
     return output_path
 
 
-def make_single_child_video(
+def make_video(
     photos_dir: Path,
     output_dir: Path,
     seconds_per_photo: int = SECONDS_PER_PHOTO,
     max_days: int = MAX_DAYS,
     resolution: str = RESOLUTION,
     crf: int = CRF,
-    birth_date: datetime.date | None = None,
+    start_date: datetime.date | None = None,
     subtitle: str | None = None,
     workers: int = DEFAULT_WORKERS,
 ) -> Path | None:
-    """Create a single-child evolution video."""
-    child_name = photos_dir.name
-    print(f"\n🎬 Creating video for {child_name}...")
+    """Create an evolution video for one subject."""
+    subject_name = photos_dir.name
+    print(f"\n🎬 Creating video for {subject_name}...")
 
     photos = find_photos(photos_dir)
     if not photos:
         print(f"  ❌ No dated photos found in {photos_dir}")
         return None
 
-    if birth_date is not None:
-        birth = birth_date
-        print(f"  📅 Birth date (provided): {birth} ({len(photos)} photos found)")
+    if start_date is not None:
+        start = start_date
+        print(f"  📅 Start date (provided): {start} ({len(photos)} photos found)")
     else:
-        birth = birth_date_from_photos(photos)
-        print(f"  📅 Birth date (inferred): {birth} ({len(photos)} photos found)")
+        start = start_date_from_photos(photos)
+        print(f"  📅 Start date (inferred): {start} ({len(photos)} photos found)")
 
     # Build a lookup: date → path
     photo_map = {date: path for date, path in photos}
@@ -279,7 +280,7 @@ def make_single_child_video(
 
         # Title card (sequential — single call, no parallelism benefit)
         title_path = tmpdir / "title.mp4"
-        make_title_card(child_name, title_path, resolution=resolution, crf=crf,
+        make_title_card(subject_name, title_path, resolution=resolution, crf=crf,
                         subtitle=subtitle or subtitle_from_max_days(max_days))
 
         # Build ordered work list and pre-convert any HEIC files sequentially
@@ -287,7 +288,7 @@ def make_single_child_video(
         work_items: list[tuple[int, Path, str, Path]] = []  # (day_num, clip_path, age_label, jpeg_path)
         last_photo = None
         for day_num in range(1, max_days + 1):
-            current_date = birth + datetime.timedelta(days=day_num - 1)
+            current_date = start + datetime.timedelta(days=day_num - 1)
             photo = photo_map.get(current_date)
 
             if photo:
@@ -296,9 +297,9 @@ def make_single_child_video(
                 # Use previous day's photo if missing
                 photo = last_photo
             else:
-                continue  # No photo yet (shouldn't happen if birth date is correct)
+                continue  # No photo yet (shouldn't happen if start date is correct)
 
-            age_label = format_age(current_date, birth)
+            age_label = format_age(current_date, start)
             clip_path = tmpdir / f"clip_{day_num:04d}.mp4"
             jpeg_path = ensure_jpeg(photo, tmpdir)  # HEIC conversion here (deduped, sequential)
             work_items.append((day_num, clip_path, age_label, jpeg_path))
@@ -349,7 +350,7 @@ def make_single_child_video(
             for _, clip_path, _, _ in work_items:
                 concat_f.write(f"file '{clip_path}'\n")
 
-        output_path = output_dir / f"evolution_{child_name}.mp4"
+        output_path = output_dir / f"evolution_{subject_name}.mp4"
         print(f"  🔗 Concatenating {total_clips + 1} clips (1 title card + {total_clips} day clips)...")
         cmd = [
             "ffmpeg", "-y",
@@ -370,14 +371,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Auto-detect birth date from earliest photo:
-  uv run baby_evolution.py --photos-dir ./photos/Emma
+  # Auto-detect start date from earliest photo:
+  uv run evolution.py --photos-dir ./photos/Emma
 
-  # Explicit birth date:
-  uv run baby_evolution.py --photos-dir ./photos/Emma --birth-date 2024-01-15
+  # Explicit start date:
+  uv run evolution.py --photos-dir ./photos/Emma --start-date 2024-01-15
 
   # Custom duration and quality:
-  uv run baby_evolution.py --photos-dir ./photos/Emma --seconds-per-photo 3 --crf 18
+  uv run evolution.py --photos-dir ./photos/Emma --seconds-per-photo 3 --crf 18
         """,
     )
     parser.add_argument("--photos-dir", type=Path, required=True,
@@ -395,9 +396,9 @@ Examples:
                         help=f"Output resolution WxH (default: {RESOLUTION})")
     parser.add_argument("--subtitle", type=str, default=None,
                         help="Override the title card subtitle (default: derived from --max-days, "
-                             "e.g. 'Birth to 6 months')")
-    parser.add_argument("--birth-date", type=datetime.date.fromisoformat,
-                        help="Override the inferred birth date (format: YYYY-MM-DD). "
+                             "e.g. 'First 6 months')")
+    parser.add_argument("--start-date", type=datetime.date.fromisoformat,
+                        help="Override the inferred start date (format: YYYY-MM-DD). "
                              "Defaults to the date of the earliest photo.")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
                         help=f"Number of parallel ffmpeg workers for clip rendering "
@@ -416,14 +417,14 @@ Examples:
 
     max_days = args.max_days if args.max_days is not None else len(photos)
 
-    make_single_child_video(
+    make_video(
         photos_dir,
         output_dir,
         seconds_per_photo=args.seconds_per_photo,
         max_days=max_days,
         resolution=args.resolution,
         crf=args.crf,
-        birth_date=args.birth_date,
+        start_date=args.start_date,
         subtitle=args.subtitle,
         workers=args.workers,
     )

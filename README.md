@@ -19,12 +19,12 @@ raw photos (any filenames)
 dated photos folder
         │
         ▼
- baby_evolution.py       ← generates the video
+ evolution.py       ← generates the video
 ```
 
 ## Folder structure
 
-`baby_evolution.py` expects photos named `YYYY-MM-DD.jpg` (or `.jpeg` / `.png` / `.heic` / `.heif`) in a folder named after the subject:
+`evolution.py` expects photos named `YYYY-MM-DD.jpg` (or `.jpeg` / `.png` / `.heic` / `.heif`) in a folder named after the subject:
 
 ```
 photos/
@@ -72,11 +72,11 @@ uv run preprocess.py --input-dir ./img/Emma --output-dir ./photos/Emma --timezon
 ## Step 2 — Generate the video
 
 ```bash
-# Birth date inferred from earliest photo
-uv run baby_evolution.py --photos-dir ./photos/Emma
+# Start date inferred from earliest photo
+uv run evolution.py --photos-dir ./photos/Emma
 
-# Explicit birth date
-uv run baby_evolution.py --photos-dir ./photos/Emma --birth-date 2024-01-15
+# Explicit start date
+uv run evolution.py --photos-dir ./photos/Emma --start-date 2024-01-15
 ```
 
 Output videos are written to `./output/` by default.
@@ -88,8 +88,8 @@ Output videos are written to `./output/` by default.
 | `--photos-dir` | *(required)* | Folder containing dated photos for a single subject |
 | `--output-dir` | `./output` | Where to write the output video |
 | `--seconds-per-photo` | `2` | How long each photo is shown |
-| `--max-days` | `183` | Number of days to cover (~6 months) |
+| `--max-days` | *(photo count)* | Number of days to cover |
 | `--crf` | `23` | H.265 quality — lower = better quality, larger file (18–28 is typical) |
 | `--resolution` | `1920x1080` | Output resolution |
 | `--subtitle` | *(derived from `--max-days`)* | Title card subtitle, e.g. `"First year"` |
-| `--birth-date` | *(inferred from earliest photo)* | Override birth date (`YYYY-MM-DD`) |
+| `--start-date` | *(inferred from earliest photo)* | Override start date (`YYYY-MM-DD`). The first photo shows "Day 0". |

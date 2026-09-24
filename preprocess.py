@@ -10,7 +10,7 @@
 Photo Preprocessor
 ==================
 Copies photos from an input directory to an output directory, renaming each
-file to YYYY-MM-DD.<ext> so they are ready for baby_evolution.py.
+file to YYYY-MM-DD.<ext> so they are ready for evolution.py.
 
 Date is resolved in priority order:
   1. Date parsed from filename — date component used directly, time ignored (camera apps embed local time)
@@ -148,7 +148,7 @@ def _parse_timezone(name: str) -> ZoneInfo:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Rename/copy photos to YYYY-MM-DD format for baby_evolution.py",
+        description="Rename/copy photos to YYYY-MM-DD format for evolution.py",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
