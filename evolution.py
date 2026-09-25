@@ -384,6 +384,16 @@ def photos_by_day(
     return days
 
 
+def photos_in_range(
+    photos: list[tuple[datetime.date, Path]],
+    start: datetime.date,
+    max_days: int,
+) -> list[tuple[datetime.date, Path]]:
+    """Return the photos taken within days 1..max_days counted from *start*."""
+    end = start + datetime.timedelta(days=max_days)
+    return [(d, p) for d, p in photos if start <= d < end]
+
+
 def render_clips(jobs: list[Callable[[], None]], workers: int) -> None:
     """Run clip render jobs in parallel with a progress bar."""
     total = len(jobs)
@@ -482,11 +492,23 @@ def make_video(
 
         render_clips([functools.partial(render_clip, *item) for item in work_items], workers)
 
+        clips = [title_path, *(clip for clip, _, _ in work_items)]
+        shown = photos_in_range(photos, start, max_days)
+        if shown:
+            (first_date, first_photo), (last_date, last_photo) = shown[0], shown[-1]
+            clips.append(make_summary_slide(
+                ensure_jpeg(first_photo, tmpdir), ensure_jpeg(last_photo, tmpdir),
+                format_age(first_date, start), format_age(last_date, start),
+                tmpdir / "summary.mp4", resolution=resolution,
+                seconds_per_photo=seconds_per_photo, crf=crf,
+            ))
+
         total_clips = len(work_items)
         output_path = output_dir / f"evolution_{subject_name}.mp4"
-        print(f"  🔗 Concatenating {total_clips + 1} clips (1 title card + {total_clips} day clips)...")
-        concat_clips([title_path, *(clip for clip, _, _ in work_items)],
-                     tmpdir / "clips.txt", output_path)
+        summary_note = " + 1 summary" if shown else ""
+        print(f"  🔗 Concatenating {len(clips)} clips "
+              f"(1 title card + {total_clips} day clips{summary_note})...")
+        concat_clips(clips, tmpdir / "clips.txt", output_path)
 
     print(f"  ✨ Done! → {output_path}")
     return output_path
@@ -565,9 +587,8 @@ def make_combined_video(
 
         # Summary: subjects as columns, first photo on the top row, last photo on the bottom.
         first_row, last_row = [], []
-        end = datetime.timedelta(days=max_days)
         for subject, (start, photos) in ((left, loaded[0]), (right, loaded[1])):
-            shown = [(d, p) for d, p in photos if start <= d < start + end]
+            shown = photos_in_range(photos, start, max_days)
             if not shown:
                 first_row.append(GridCell(None, top_label=subject.name))
                 last_row.append(GridCell(None, top_label=subject.name))
