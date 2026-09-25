@@ -122,14 +122,16 @@ Rules:
 ## Combined side-by-side video
 
 A combined video shows two subjects side by side, day by day. Use a configuration file with two `[[subjects]]` tables.
-The first subject is the left panel, and the second subject is the right panel.
+The first subject is the left panel, and the second subject is the right panel. The order also sets the name order in
+the title card, the output file name and the summary slide columns. To swap the panels, swap the two `[[subjects]]`
+tables.
 
 ```toml
 # pair.toml
-[[subjects]]
+[[subjects]]                    # first subject = left panel
 photos_dir = "./photos/Emma"
 
-[[subjects]]
+[[subjects]]                    # second subject = right panel
 photos_dir = "./photos/Noah"
 ```
 
