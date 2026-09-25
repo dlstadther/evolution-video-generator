@@ -79,7 +79,8 @@ uv run evolution.py --photos-dir ./photos/Emma
 uv run evolution.py --photos-dir ./photos/Emma --start-date 2024-01-15
 ```
 
-Output videos are written to `./output/` by default.
+Output videos are written to `./output/` by default. Each video ends with a summary slide that shows the first and last
+photos side by side, with their ages.
 
 ## Configuration file
 
