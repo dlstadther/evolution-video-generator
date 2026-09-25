@@ -83,47 +83,49 @@ Output videos are written to `./output/` by default.
 
 ## Configuration file
 
-To make videos for many subjects in one run, put the settings in a TOML file and pass it with `--config`. The script makes one video for each `[[subjects]]` table.
+You can put the configuration in a TOML file and pass it with `--config`. The number of `[[subjects]]` tables selects
+the video type:
+
+- 1 subject: the script makes a single video for that subject.
+- 2 subjects: the script makes only a combined side-by-side video. See
+  [Combined side-by-side video](#combined-side-by-side-video).
+
+Any other number of subjects is an error.
 
 ```toml
-# evolution.toml
+# emma.toml
 output_dir = "./output"
 seconds_per_photo = 2
+max_days = 180
 
 [[subjects]]
 name = "Emma"                  # optional, defaults to the photos_dir folder name
 photos_dir = "./photos/Emma"   # required
-start_date = 2024-01-15
-
-[[subjects]]
-photos_dir = "./photos/Noah"
-max_days = 180
+start_date = 2024-01-15        # optional, defaults to the earliest photo
 ```
 
 ```bash
-uv run evolution.py --config evolution.toml
+uv run evolution.py --config emma.toml
 
-# A CLI flag overrides the config value for every subject
-uv run evolution.py --config evolution.toml --crf 18
+# A CLI flag overrides the configuration value
+uv run evolution.py --config emma.toml --crf 18
 ```
 
 Rules:
 
-- These keys are top-level only: `output_dir`, `seconds_per_photo`, `crf`, `resolution`, `workers` and `combined`.
-- These keys are allowed at the top level and in `[[subjects]]`: `max_days`, `subtitle` and `start_date`. A top-level value is the default for every subject. A value inside `[[subjects]]` overrides it for that subject.
-- Each subject also takes `photos_dir` (required) and `name`.
-- A CLI flag overrides the config value.
-- Relative paths resolve against the folder that contains the config file.
-- An unknown key, or a top-level-only key inside `[[subjects]]`, is an error.
+- Top-level keys: `output_dir`, `seconds_per_photo`, `max_days`, `crf`, `resolution`, `subtitle` and `workers`.
+- Subject keys: `photos_dir` (required), `name` and `start_date`.
+- A top-level key inside `[[subjects]]` is an error. An unknown key is also an error.
+- A CLI flag overrides the configuration value. `--start-date` overrides the start date of every subject.
+- Relative paths resolve against the folder that contains the configuration file.
 
 ## Combined side-by-side video
 
-A combined video shows two subjects side by side, day by day. Use a config file with exactly two `[[subjects]]` tables. The first subject is the left panel, and the second subject is the right panel.
+A combined video shows two subjects side by side, day by day. Use a configuration file with two `[[subjects]]` tables.
+The first subject is the left panel, and the second subject is the right panel.
 
 ```toml
 # pair.toml
-combined = "also"   # "also": individual videos + combined video. "only": combined video only.
-
 [[subjects]]
 photos_dir = "./photos/Emma"
 
@@ -133,29 +135,27 @@ photos_dir = "./photos/Noah"
 
 ```bash
 uv run evolution.py --config pair.toml
-
-# The CLI flags override the config value
-uv run evolution.py --config pair.toml --combined
-uv run evolution.py --config pair.toml --combined-only
 ```
 
 The combined video:
 
 - Starts with the title card "Evolution of Emma & Noah".
-- Shows each subject's name at the top of its panel and its age at the bottom. Day N of each panel counts from that subject's own start date.
-- Covers the larger photo count of the two subjects. The subject with fewer photos repeats its last photo until the end. To set a different length, use a top-level `max_days` or `--max-days`.
-- Ends with a 2x2 summary slide. The columns are the subjects. The top row shows the first photos, and the bottom row shows the last photos.
-- Uses only top-level and CLI settings. A per-subject `max_days` or `subtitle` applies only to that subject's own video.
+- Shows each subject's name at the top of its panel and its age at the bottom. Day N of each panel counts from that
+  subject's own start date.
+- Covers the larger photo count of the two subjects. The subject with fewer photos repeats its last photo until the
+  end. To set a different length, use `max_days` or `--max-days`.
+- Ends with a 2x2 summary slide. The columns are the subjects. The top row shows the first photos, and the bottom row
+  shows the last photos.
 - Is written to `evolution_<left>_<right>_combined.mp4`.
+
+To make a single video for each subject too, use a separate 1-subject configuration file for each subject.
 
 ## Options
 
 | Flag | Default | Description |
 |---|---|---|
 | `--photos-dir` | *(required unless `--config`)* | Folder containing dated photos for a single subject |
-| `--config` | *(none)* | TOML configuration file. You cannot use it with `--photos-dir`. |
-| `--combined` | off | Also make a combined video of the 2 config subjects. Needs `--config`. |
-| `--combined-only` | off | Make only the combined video. Needs `--config`. |
+| `--config` | *(none)* | TOML configuration file with 1 subject (single video) or 2 subjects (combined video). You cannot use it with `--photos-dir`. |
 | `--output-dir` | `./output` | Where to write the output video |
 | `--seconds-per-photo` | `2` | How long each photo is shown |
 | `--max-days` | *(photo count)* | Number of days to cover |

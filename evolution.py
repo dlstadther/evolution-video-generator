@@ -14,7 +14,6 @@ Creates an "Evolution of <subject>" slideshow video from daily photos.
 Usage:
     uv run evolution.py --photos-dir ./photos/Emma --start-date 2024-01-15
     uv run evolution.py --config evolution.toml
-    uv run evolution.py --config evolution.toml --combined
 
 Requirements:
     - uv (https://docs.astral.sh/uv/)
@@ -591,14 +590,11 @@ def make_combined_video(
 
 
 # Config keys. Each setting maps to the make_video() keyword and CLI flag of the same name.
-# Encoding and output settings are top-level only, so a combined video has one
-# clear value for each.
-TOP_LEVEL_ONLY_KEYS = {"output_dir", "seconds_per_photo", "crf", "resolution", "workers", "combined"}
-# Allowed at the top level (as a default for every subject) and per subject.
-SUBJECT_SETTING_KEYS = {"max_days", "subtitle", "start_date"}
-SUBJECT_ONLY_KEYS = {"name", "photos_dir"}
-SETTING_KEYS = (TOP_LEVEL_ONLY_KEYS - {"combined"}) | SUBJECT_SETTING_KEYS
-COMBINED_MODES = {"also", "only"}
+# The subject count picks the mode: 1 subject makes a single video, 2 subjects
+# make a combined video only. So every setting except start_date is top-level.
+TOP_LEVEL_KEYS = {"output_dir", "seconds_per_photo", "crf", "resolution", "workers", "max_days", "subtitle"}
+SUBJECT_KEYS = {"name", "photos_dir", "start_date"}
+SETTING_KEYS = TOP_LEVEL_KEYS | {"start_date"}
 BUILTIN_SETTINGS = {
     "output_dir": Path(OUTPUT_DIR),
     "seconds_per_photo": SECONDS_PER_PHOTO,
@@ -606,7 +602,6 @@ BUILTIN_SETTINGS = {
     "crf": CRF,
     "resolution": RESOLUTION,
     "subtitle": None,
-    "start_date": None,
     "workers": DEFAULT_WORKERS,
 }
 
@@ -625,12 +620,10 @@ def _normalize_setting(key: str, value, base_dir: Path):
 
 
 def load_config(config_path: Path) -> tuple[dict, list[dict]]:
-    """Read a TOML config file and return (top_level_settings, subject_jobs).
+    """Read a TOML config file and return (settings, subjects).
 
-    Each job merges the top-level settings (except 'combined') with the
-    subject's own keys. Relative paths resolve against the config file's
-    folder, so the config works from any current directory. Unknown keys
-    are an error, to catch typos.
+    Relative paths resolve against the config file's folder, so the config
+    works from any current directory. Unknown keys are an error, to catch typos.
     """
     try:
         with open(config_path, "rb") as f:
@@ -640,29 +633,27 @@ def load_config(config_path: Path) -> tuple[dict, list[dict]]:
 
     base_dir = config_path.resolve().parent
     subjects = raw.pop("subjects", None)
-    unknown = set(raw) - TOP_LEVEL_ONLY_KEYS - SUBJECT_SETTING_KEYS
+    unknown = set(raw) - TOP_LEVEL_KEYS
     if unknown:
         raise ConfigError(f"Unknown top-level keys: {', '.join(sorted(unknown))}")
-    if "combined" in raw and raw["combined"] not in COMBINED_MODES:
-        raise ConfigError(f"'combined' must be one of: {', '.join(sorted(COMBINED_MODES))}")
-    if not isinstance(subjects, list) or not subjects:
-        raise ConfigError("Config needs at least one [[subjects]] table")
+    if not isinstance(subjects, list) or len(subjects) not in (1, 2):
+        count = len(subjects) if isinstance(subjects, list) else 0
+        raise ConfigError(f"Config needs 1 [[subjects]] table (single video) or 2 (combined video), "
+                          f"found {count}")
 
-    top = {k: _normalize_setting(k, v, base_dir) for k, v in raw.items()}
-    jobs = []
+    settings = {k: _normalize_setting(k, v, base_dir) for k, v in raw.items()}
+    normalized = []
     for i, subject in enumerate(subjects, start=1):
-        top_only = set(subject) & TOP_LEVEL_ONLY_KEYS
+        top_only = set(subject) & TOP_LEVEL_KEYS
         if top_only:
             raise ConfigError(f"Subject #{i}: only allowed at the top level: {', '.join(sorted(top_only))}")
-        unknown = set(subject) - SUBJECT_SETTING_KEYS - SUBJECT_ONLY_KEYS
+        unknown = set(subject) - SUBJECT_KEYS
         if unknown:
             raise ConfigError(f"Subject #{i}: unknown keys: {', '.join(sorted(unknown))}")
         if "photos_dir" not in subject:
             raise ConfigError(f"Subject #{i}: missing required key 'photos_dir'")
-        job = {k: v for k, v in top.items() if k != "combined"}
-        job.update({k: _normalize_setting(k, v, base_dir) for k, v in subject.items()})
-        jobs.append(job)
-    return top, jobs
+        normalized.append({k: _normalize_setting(k, v, base_dir) for k, v in subject.items()})
+    return settings, normalized
 
 
 def main():
@@ -680,28 +671,21 @@ Examples:
   # Custom duration and quality:
   uv run evolution.py --photos-dir ./photos/Emma --seconds-per-photo 3 --crf 18
 
-  # One video per subject listed in a TOML config file:
+  # TOML config file: 1 subject makes a single video,
+  # 2 subjects make a combined side-by-side video:
   uv run evolution.py --config evolution.toml
 
-  # CLI flags override config values for every subject:
+  # CLI flags override config values:
   uv run evolution.py --config evolution.toml --crf 18
-
-  # Side-by-side video of the 2 subjects in the config, plus their own videos:
-  uv run evolution.py --config evolution.toml --combined
         """,
     )
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--photos-dir", type=Path,
                         help="Folder containing dated photos (YYYY-MM-DD.jpg) for a single subject.")
     source.add_argument("--config", type=Path,
-                        help="TOML config file with one [[subjects]] table per subject. "
+                        help="TOML config file with 1 [[subjects]] table (single video) or 2 "
+                             "(combined side-by-side video: first = left, second = right). "
                              "Relative paths resolve against the config file's folder.")
-    combined = parser.add_mutually_exclusive_group()
-    combined.add_argument("--combined", dest="combined", action="store_const", const="also",
-                          help="Also make a side-by-side video of the 2 config subjects "
-                               "(first = left, second = right). Needs --config.")
-    combined.add_argument("--combined-only", dest="combined", action="store_const", const="only",
-                          help="Make only the side-by-side video. Needs --config.")
     # Setting flags default to None so an explicit flag can override config values.
     parser.add_argument("--output-dir", type=Path, default=None,
                         help=f"Where to save the output video (default: {OUTPUT_DIR})")
@@ -719,8 +703,8 @@ Examples:
                         help="Override the title card subtitle (default: derived from --max-days, "
                              "e.g. 'First 6 months')")
     parser.add_argument("--start-date", type=datetime.date.fromisoformat, default=None,
-                        help="Override the inferred start date (format: YYYY-MM-DD). "
-                             "Defaults to the date of the earliest photo.")
+                        help="Override the inferred start date for every subject (format: YYYY-MM-DD). "
+                             "Defaults to the date of each subject's earliest photo.")
     parser.add_argument("--workers", type=int, default=None,
                         help=f"Number of parallel ffmpeg workers for clip rendering "
                              f"(default: {DEFAULT_WORKERS}). Use 1 to render sequentially.")
@@ -729,59 +713,36 @@ Examples:
 
     if args.config:
         try:
-            top, jobs = load_config(args.config)
+            config_settings, subjects = load_config(args.config)
         except ConfigError as e:
             print(f"❌ {e}")
             sys.exit(1)
     else:
-        top, jobs = {}, [{"photos_dir": args.photos_dir.resolve()}]
-
-    combined_mode = args.combined or top.get("combined")
-    if combined_mode and len(jobs) != 2:
-        print("❌ A combined video needs --config with exactly 2 [[subjects]] "
-              f"(found {len(jobs) if args.config else 0}).")
-        sys.exit(1)
+        config_settings, subjects = {}, [{"photos_dir": args.photos_dir.resolve()}]
 
     cli_settings = {k: getattr(args, k) for k in SETTING_KEYS if getattr(args, k) is not None}
+    cli_start = cli_settings.pop("start_date", None)
+    settings = {**BUILTIN_SETTINGS, **config_settings, **cli_settings}
+    settings["output_dir"] = settings["output_dir"].resolve()
+    subjects = [
+        Subject(s.get("name") or s["photos_dir"].name, s["photos_dir"], cli_start or s.get("start_date"))
+        for s in subjects
+    ]
 
     check_ffmpeg()
 
-    failed = []
-    if combined_mode != "only":
-        for job in jobs:
-            settings = {**BUILTIN_SETTINGS, **job, **cli_settings}
-            photos_dir = settings.pop("photos_dir")
-            output_dir = settings.pop("output_dir").resolve()
-            result = make_video(photos_dir, output_dir, subject_name=settings.pop("name", None), **settings)
-            if result is None:
-                failed.append(str(photos_dir))
+    if len(subjects) == 1:
+        (subject,) = subjects
+        output_dir = settings.pop("output_dir")
+        result = make_video(subject.photos_dir, output_dir, start_date=subject.start_date,
+                            subject_name=subject.name, **settings)
+    else:
+        result = make_combined_video(*subjects, **settings)
 
-    if combined_mode:
-        # The combined video uses top-level and CLI settings. Per-subject
-        # max_days and subtitle apply only to that subject's own video.
-        shared = {**BUILTIN_SETTINGS, **{k: v for k, v in top.items() if k != "combined"}, **cli_settings}
-        left, right = (
-            Subject(job.get("name") or job["photos_dir"].name, job["photos_dir"],
-                    cli_settings.get("start_date", job.get("start_date")))
-            for job in jobs
-        )
-        result = make_combined_video(
-            left, right, shared["output_dir"].resolve(),
-            seconds_per_photo=shared["seconds_per_photo"],
-            max_days=shared["max_days"],
-            resolution=shared["resolution"],
-            crf=shared["crf"],
-            subtitle=shared["subtitle"],
-            workers=shared["workers"],
-        )
-        if result is None:
-            failed.append(f"combined {left.name} & {right.name}")
-
-    total = (0 if combined_mode == "only" else len(jobs)) + (1 if combined_mode else 0)
-    if failed:
-        print(f"\n❌ {len(failed)} of {total} video(s) failed: " + ", ".join(failed))
+    if result is None:
+        print("\n❌ Video failed.")
         sys.exit(1)
-    print(f"\n🎉 All done! {total} video(s) saved.")
+    print(f"\n🎉 All done! Video saved to: {result}")
 
 
 if __name__ == "__main__":
