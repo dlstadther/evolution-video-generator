@@ -424,6 +424,51 @@ def concat_clips(clips: list[Path], list_path: Path, output_path: Path) -> None:
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def single_summary_slide(
+    photos: list[tuple[datetime.date, Path]],
+    start: datetime.date,
+    max_days: int,
+    tmpdir: Path,
+    output_path: Path,
+    resolution: str,
+    seconds_per_photo: int,
+    crf: int,
+) -> Path | None:
+    """Render the first-vs-last summary slide, or return None if no photo is in range."""
+    shown = photos_in_range(photos, start, max_days)
+    if not shown:
+        return None
+    (first_date, first_photo), (last_date, last_photo) = shown[0], shown[-1]
+    return make_summary_slide(
+        ensure_jpeg(first_photo, tmpdir), ensure_jpeg(last_photo, tmpdir),
+        format_age(first_date, start), format_age(last_date, start),
+        output_path, resolution=resolution, seconds_per_photo=seconds_per_photo, crf=crf,
+    )
+
+
+def combined_summary_slide(
+    subjects: list[tuple["Subject", datetime.date, list[tuple[datetime.date, Path]]]],
+    max_days: int,
+    tmpdir: Path,
+    output_path: Path,
+    resolution: str,
+    seconds_per_photo: int,
+    crf: int,
+) -> Path:
+    """Render the 2x2 summary: subjects as columns, first photo on top, last photo below."""
+    first_row, last_row = [], []
+    for subject, start, photos in subjects:
+        shown = photos_in_range(photos, start, max_days)
+        if not shown:
+            first_row.append(GridCell(None, top_label=subject.name))
+            last_row.append(GridCell(None, top_label=subject.name))
+            continue
+        for row, (photo_date, photo) in ((first_row, shown[0]), (last_row, shown[-1])):
+            row.append(GridCell(ensure_jpeg(photo, tmpdir), subject.name, format_age(photo_date, start)))
+    return make_grid_clip([first_row, last_row], output_path,
+                          resolution=resolution, seconds=seconds_per_photo, crf=crf)
+
+
 def make_video(
     photos_dir: Path,
     output_dir: Path,
@@ -435,11 +480,12 @@ def make_video(
     subtitle: str | None = None,
     workers: int = DEFAULT_WORKERS,
     subject_name: str | None = None,
+    summary_only: bool = False,
 ) -> Path | None:
     """Create an evolution video for one subject.
 
     *subject_name* defaults to the photos folder name. *max_days* defaults
-    to the photo count.
+    to the photo count. With *summary_only*, render only the summary slide.
     """
     subject_name = subject_name or photos_dir.name
     print(f"\n🎬 Creating video for {subject_name}...")
@@ -453,6 +499,17 @@ def make_video(
 
     w, h = resolution.split("x")
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if summary_only:
+        output_path = output_dir / f"summary_{subject_name}.mp4"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = single_summary_slide(photos, start, max_days, Path(tmpdir), output_path,
+                                          resolution, seconds_per_photo, crf)
+        if result is None:
+            print(f"  ❌ No photos within {max_days} days of {start}")
+            return None
+        print(f"  ✨ Done! → {output_path}")
+        return output_path
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
@@ -493,19 +550,14 @@ def make_video(
         render_clips([functools.partial(render_clip, *item) for item in work_items], workers)
 
         clips = [title_path, *(clip for clip, _, _ in work_items)]
-        shown = photos_in_range(photos, start, max_days)
-        if shown:
-            (first_date, first_photo), (last_date, last_photo) = shown[0], shown[-1]
-            clips.append(make_summary_slide(
-                ensure_jpeg(first_photo, tmpdir), ensure_jpeg(last_photo, tmpdir),
-                format_age(first_date, start), format_age(last_date, start),
-                tmpdir / "summary.mp4", resolution=resolution,
-                seconds_per_photo=seconds_per_photo, crf=crf,
-            ))
+        summary_path = single_summary_slide(photos, start, max_days, tmpdir, tmpdir / "summary.mp4",
+                                            resolution, seconds_per_photo, crf)
+        if summary_path:
+            clips.append(summary_path)
 
         total_clips = len(work_items)
         output_path = output_dir / f"evolution_{subject_name}.mp4"
-        summary_note = " + 1 summary" if shown else ""
+        summary_note = " + 1 summary" if summary_path else ""
         print(f"  🔗 Concatenating {len(clips)} clips "
               f"(1 title card + {total_clips} day clips{summary_note})...")
         concat_clips(clips, tmpdir / "clips.txt", output_path)
@@ -530,12 +582,14 @@ def make_combined_video(
     crf: int = CRF,
     subtitle: str | None = None,
     workers: int = DEFAULT_WORKERS,
+    summary_only: bool = False,
 ) -> Path | None:
     """Create a side-by-side evolution video of two subjects, ending in a 2x2 summary.
 
     Day N of each panel counts from that subject's own start date.
     *max_days* defaults to the larger photo count: the subject with fewer
-    photos repeats its last photo until the end.
+    photos repeats its last photo until the end. With *summary_only*,
+    render only the 2x2 summary slide.
     """
     print(f"\n🎬 Creating combined video for {left.name} & {right.name}...")
     loaded = []
@@ -553,6 +607,15 @@ def make_combined_video(
               f" → {max_days} days")
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    summary_subjects = [(left, left_start, left_photos), (right, right_start, right_photos)]
+
+    if summary_only:
+        output_path = output_dir / f"summary_{left.name}_{right.name}_combined.mp4"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            combined_summary_slide(summary_subjects, max_days, Path(tmpdir), output_path,
+                                   resolution, seconds_per_photo, crf)
+        print(f"  ✨ Done! → {output_path}")
+        return output_path
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
@@ -585,19 +648,8 @@ def make_combined_video(
             workers,
         )
 
-        # Summary: subjects as columns, first photo on the top row, last photo on the bottom.
-        first_row, last_row = [], []
-        for subject, (start, photos) in ((left, loaded[0]), (right, loaded[1])):
-            shown = photos_in_range(photos, start, max_days)
-            if not shown:
-                first_row.append(GridCell(None, top_label=subject.name))
-                last_row.append(GridCell(None, top_label=subject.name))
-                continue
-            for row, (photo_date, photo) in ((first_row, shown[0]), (last_row, shown[-1])):
-                row.append(GridCell(ensure_jpeg(photo, tmpdir), subject.name,
-                                    format_age(photo_date, start)))
-        summary_path = make_grid_clip([first_row, last_row], tmpdir / "summary.mp4",
-                                      resolution=resolution, seconds=seconds_per_photo, crf=crf)
+        summary_path = combined_summary_slide(summary_subjects, max_days, tmpdir, tmpdir / "summary.mp4",
+                                              resolution, seconds_per_photo, crf)
 
         total_clips = len(work_items)
         output_path = output_dir / f"evolution_{left.name}_{right.name}_combined.mp4"
@@ -696,6 +748,9 @@ Examples:
   # 2 subjects make a combined side-by-side video:
   uv run evolution.py --config evolution.toml
 
+  # Only the final summary slide, for a quick look:
+  uv run evolution.py --photos-dir ./photos/Emma --summary-only
+
   # CLI flags override config values:
   uv run evolution.py --config evolution.toml --crf 18
         """,
@@ -726,6 +781,9 @@ Examples:
     parser.add_argument("--start-date", type=datetime.date.fromisoformat, default=None,
                         help="Override the inferred start date for every subject (format: YYYY-MM-DD). "
                              "Defaults to the date of each subject's earliest photo.")
+    parser.add_argument("--summary-only", action="store_true",
+                        help="Render only the final summary slide (first vs last photo; a 2x2 grid for "
+                             "a combined video) to summary_<name>.mp4. Skips the title card and day clips.")
     parser.add_argument("--workers", type=int, default=None,
                         help=f"Number of parallel ffmpeg workers for clip rendering "
                              f"(default: {DEFAULT_WORKERS}). Use 1 to render sequentially.")
@@ -756,9 +814,9 @@ Examples:
         (subject,) = subjects
         output_dir = settings.pop("output_dir")
         result = make_video(subject.photos_dir, output_dir, start_date=subject.start_date,
-                            subject_name=subject.name, **settings)
+                            subject_name=subject.name, summary_only=args.summary_only, **settings)
     else:
-        result = make_combined_video(*subjects, **settings)
+        result = make_combined_video(*subjects, summary_only=args.summary_only, **settings)
 
     if result is None:
         print("\n❌ Video failed.")

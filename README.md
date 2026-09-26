@@ -166,3 +166,4 @@ To make a single video for each subject too, use a separate 1-subject configurat
 | `--resolution` | `1920x1080` | Output resolution |
 | `--subtitle` | *(derived from `--max-days`)* | Title card subtitle, e.g. `"First year"` |
 | `--start-date` | *(inferred from earliest photo)* | Override start date (`YYYY-MM-DD`). The first photo shows "Day 0". |
+| `--summary-only` | off | Render only the final summary slide to `summary_<name>.mp4` (a combined configuration gives `summary_<left>_<right>_combined.mp4`). The title card and day clips are skipped. |
