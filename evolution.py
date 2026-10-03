@@ -277,20 +277,37 @@ def _encode_args(crf: int, seconds: int) -> list[str]:
     ]
 
 
+def _scaled_width(photo: Path, cell_w: int, cell_h: int) -> int:
+    """Return the width of *photo* after it is scaled to fit a cell_w x cell_h cell."""
+    from PIL import Image
+    with Image.open(photo) as img:
+        img_w, img_h = img.size
+        # EXIF orientations 5-8 rotate by 90 degrees. ffmpeg applies them, so swap.
+        if img.getexif().get(0x0112) in {5, 6, 7, 8}:
+            img_w, img_h = img_h, img_w
+    return round(img_w * min(cell_w / img_w, cell_h / img_h))
+
+
 def _grid_args(
     cells: list[list[GridCell]],
     resolution: str,
     top_font_size: int,
     bottom_font_size: int,
+    meet_at_center: bool = False,
 ) -> list[str]:
     """Return the ffmpeg inputs and filter that lay out photos in a rows x cols grid.
 
     Each photo is pillarboxed (black bars, no crop) into its cell. The top
     label sits at the top of its cell and the bottom label at the bottom.
+    By default each photo is centered in its cell. With *meet_at_center*,
+    photos left of the middle sit flush right and photos right of the middle
+    sit flush left, so no black gap shows between them. Labels stay centered
+    over their photo.
     """
     w, h = (int(v) for v in resolution.split("x"))
     rows, cols = len(cells), len(cells[0])
     cell_w, cell_h = w // cols, h // rows
+    middle = (cols - 1) / 2
 
     inputs: list[str] = []
     parts: list[str] = []
@@ -303,11 +320,17 @@ def _grid_args(
                 inputs += ["-f", "lavfi", "-i", f"color=black:s={cell_w}x{cell_h}:r={FPS}"]
             else:
                 inputs += ["-loop", "1", "-i", str(cell.photo)]
+            if meet_at_center and cell.photo is not None and c != middle:
+                photo_w = _scaled_width(cell.photo, cell_w, cell_h)
+                pad_x, photo_x = ("ow-iw", cell_w - photo_w) if c < middle else ("0", 0)
+                x = f"{c * cell_w + photo_x + photo_w // 2}-text_w/2"
+            else:
+                pad_x = "(ow-iw)/2"
+                x = f"{c * cell_w}+({cell_w}-text_w)/2"
             parts.append(
                 f"[{i}:v]scale={cell_w}:{cell_h}:force_original_aspect_ratio=decrease,"
-                f"pad={cell_w}:{cell_h}:(ow-iw)/2:(oh-ih)/2:black[c{i}]"
+                f"pad={cell_w}:{cell_h}:{pad_x}:(oh-ih)/2:black[c{i}]"
             )
-            x = f"{c * cell_w}+({cell_w}-text_w)/2"
             if cell.top_label:
                 drawtexts.append(
                     f"drawtext=text='{ffmpeg_escape(cell.top_label)}':fontsize={top_font_size}:"
@@ -334,9 +357,10 @@ def make_grid_clip(
     crf: int = CRF,
     top_font_size: int = FONT_SIZE_NAME,
     bottom_font_size: int = FONT_SIZE_SUMMARY,
+    meet_at_center: bool = False,
 ) -> Path:
     """Render a video clip of a photo grid (see _grid_args for the layout)."""
-    cmd = ["ffmpeg", "-y", *_grid_args(cells, resolution, top_font_size, bottom_font_size),
+    cmd = ["ffmpeg", "-y", *_grid_args(cells, resolution, top_font_size, bottom_font_size, meet_at_center),
            *_encode_args(crf, seconds), str(output_path)]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return output_path
@@ -348,9 +372,10 @@ def make_grid_image(
     resolution: str = RESOLUTION,
     top_font_size: int = FONT_SIZE_NAME,
     bottom_font_size: int = FONT_SIZE_SUMMARY,
+    meet_at_center: bool = False,
 ) -> Path:
     """Render a still image of a photo grid (see _grid_args for the layout)."""
-    cmd = ["ffmpeg", "-y", *_grid_args(cells, resolution, top_font_size, bottom_font_size),
+    cmd = ["ffmpeg", "-y", *_grid_args(cells, resolution, top_font_size, bottom_font_size, meet_at_center),
            "-frames:v", "1", "-update", "1", str(output_path)]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return output_path
@@ -607,7 +632,7 @@ def make_combined_video(
         output_path = output_dir / f"summary_{left.name}_{right.name}_combined.png"
         with tempfile.TemporaryDirectory() as tmpdir:
             make_grid_image(combined_summary_cells(summary_subjects, max_days, Path(tmpdir)),
-                            output_path, resolution=resolution)
+                            output_path, resolution=resolution, meet_at_center=True)
         print(f"  ✨ Done! → {output_path}")
         return output_path
 
@@ -637,14 +662,14 @@ def make_combined_video(
 
         render_clips(
             [functools.partial(make_grid_clip, cells, clip_path, resolution=resolution,
-                               seconds=seconds_per_photo, crf=crf)
+                               seconds=seconds_per_photo, crf=crf, meet_at_center=True)
              for clip_path, cells in work_items],
             workers,
         )
 
         summary_path = make_grid_clip(combined_summary_cells(summary_subjects, max_days, tmpdir),
                                       tmpdir / "summary.mp4", resolution=resolution,
-                                      seconds=seconds_per_photo, crf=crf)
+                                      seconds=seconds_per_photo, crf=crf, meet_at_center=True)
 
         total_clips = len(work_items)
         output_path = output_dir / f"evolution_{left.name}_{right.name}_combined.mp4"
