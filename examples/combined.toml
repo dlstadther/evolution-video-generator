@@ -1,0 +1,29 @@
+# Sample configuration for a combined side-by-side video of two subjects.
+#
+# Copy this file to the repository root, then change the names and the paths:
+#   cp examples/combined.toml pair.toml
+#   uv run evolution.py --config pair.toml
+#
+# Two [[subjects]] tables make only the combined video. The first subject is the
+# left panel and the second subject is the right panel. The order also sets the
+# names in the title card, the output file name and the summary slide columns.
+#
+# Relative paths resolve against the folder that contains this file.
+# This file is in examples/, so the paths start with "../".
+# A copy at the repository root uses "./photos/...".
+#
+# Encoding and length settings are top-level only. They apply to the whole video.
+
+output_dir = "../output"
+seconds_per_photo = 2
+# max_days = 180             # default: the larger photo count of the two subjects
+
+[[subjects]]                   # first subject = left panel
+photos_dir = "../photos/Emma"
+name = "Emma"
+# start_date = 2024-01-15      # default: the date of this subject's earliest photo
+
+[[subjects]]                   # second subject = right panel
+photos_dir = "../photos/Noah"
+name = "Noah"
+# start_date = 2025-03-02

@@ -15,3 +15,6 @@ photos/*
 # Generated videos — ignore output files, keep the placeholder README
 output/*
 !output/README.md
+
+# Personal configuration files at the repo root (subject names and paths); examples/ stays tracked
+/*.toml

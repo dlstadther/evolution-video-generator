@@ -22,9 +22,9 @@ Files that cannot be dated are skipped with a warning.
 Originals are never modified.
 
 Usage:
-    uv run preprocess.py --input-dir ./img/Scottie --output-dir ./photos/Scottie
-    uv run preprocess.py --input-dir ./img/Scottie --output-dir ./photos/Scottie --dry-run
-    uv run preprocess.py --input-dir ./img/Scottie --output-dir ./photos/Scottie --timezone America/New_York
+    uv run preprocess.py --input-dir ./raw/Emma --output-dir ./photos/Emma
+    uv run preprocess.py --input-dir ./raw/Emma --output-dir ./photos/Emma --dry-run
+    uv run preprocess.py --input-dir ./raw/Emma --output-dir ./photos/Emma --timezone America/New_York
 """
 
 import argparse
@@ -152,9 +152,9 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  uv run preprocess.py --input-dir ./img/Scottie --output-dir ./photos/Scottie
-  uv run preprocess.py --input-dir ./img/Scottie --output-dir ./photos/Scottie --dry-run
-  uv run preprocess.py --input-dir ./img/Scottie --output-dir ./photos/Scottie --timezone America/New_York
+  uv run preprocess.py --input-dir ./raw/Emma --output-dir ./photos/Emma
+  uv run preprocess.py --input-dir ./raw/Emma --output-dir ./photos/Emma --dry-run
+  uv run preprocess.py --input-dir ./raw/Emma --output-dir ./photos/Emma --timezone America/New_York
         """,
     )
     parser.add_argument("--input-dir", type=Path, required=True,
