@@ -1,13 +1,20 @@
 # output/
 
-Generated videos are written here by `evolution.py`.
+`evolution.py` writes its videos and summary images here. Git ignores these files.
 
-Output files are named `evolution_<SubjectName>.mp4` — for example, a subject folder named `Emma` produces `evolution_Emma.mp4`.
+| Input | Output file |
+|---|---|
+| One subject, for example the folder `photos/Emma` | `evolution_Emma.mp4` |
+| Two subjects in a configuration file, Emma on the left and Noah on the right | `evolution_Emma_Noah_combined.mp4` |
+| One subject with `--summary-image` | `summary_Emma.png` |
+| Two subjects with `--summary-image` | `summary_Emma_Noah_combined.png` |
 
-To generate a video:
+The subject name is the photo folder name, unless the configuration file sets `name`.
+
+To make a video:
 
 ```bash
 uv run evolution.py --photos-dir ./photos/Emma
 ```
 
-See the project README for all available options.
+The project README describes all options.

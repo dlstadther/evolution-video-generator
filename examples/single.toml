@@ -1,0 +1,24 @@
+# Sample configuration for a single-subject video.
+#
+# Copy this file to the repository root, then change the name and the path:
+#   cp examples/single.toml emma.toml
+#   uv run evolution.py --config emma.toml
+#
+# Relative paths resolve against the folder that contains this file.
+# This file is in examples/, so the path to the photos starts with "../".
+# A copy at the repository root uses "./photos/Emma".
+#
+# Each top-level value below is the default. Delete a line to keep the default.
+
+output_dir = "../output"     # folder for the video
+seconds_per_photo = 2        # seconds that the video shows each photo
+crf = 23                     # H.265 quality: lower = better quality, larger file
+resolution = "1920x1080"     # WIDTHxHEIGHT
+# max_days = 180             # default: the photo count
+# subtitle = "First 6 months"  # default: made from max_days
+# workers = 8                # default: CPU count, at most 8
+
+[[subjects]]
+photos_dir = "../photos/Emma"  # required: folder of YYYY-MM-DD.<ext> photos
+name = "Emma"                  # default: the photos_dir folder name
+# start_date = 2024-01-15      # default: the date of the earliest photo
